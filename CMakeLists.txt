@@ -29,7 +29,8 @@ if(APPLE)
   endif()
 endif()
 
-add_definitions(-Wall -Wextra -pedantic -Wno-unused-parameter -std=gnu99)
+add_definitions(-Wall -Wextra -pedantic -Wno-unused-parameter
+    -Wstrict-prototypes -std=gnu99)
 
 option(
   TRAVIS_CI_BUILD "Travis CI build.  Extra compilation flags will be set." OFF)
@@ -91,36 +92,32 @@ find_package(Threads REQUIRED)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-find_program(LUA_PRG luajit)
+# Find Lua interpreter
+include(LuaHelpers)
+set(LUA_DEPENDENCIES lpeg MessagePack bit)
+if(NOT LUA_PRG)
+  foreach(CURRENT_LUA_PRG luajit lua)
+    # If LUA_PRG is set find_program() will not search
+    unset(LUA_PRG CACHE)
+    unset(LUA_PRG_WORKS)
+    find_program(LUA_PRG ${CURRENT_LUA_PRG})
 
-# Need a lua interpreter for running the msgapck metadata/dispatch generator
-if(NOT EXISTS ${LUA_PRG})
-  find_program(LUA_PRG lua)
-endif()
-
-if(EXISTS ${LUA_PRG})
-  message(STATUS "Using the lua interpreter ${LUA_PRG}")
+    if(LUA_PRG)
+      check_lua_deps(${LUA_PRG} "${LUA_DEPENDENCIES}" LUA_PRG_WORKS)
+      if(LUA_PRG_WORKS)
+        break()
+      endif()
+    endif()
+  endforeach()
 else()
-  message(FATAL_ERROR "A lua interpreter is required for building the Neovim")
+  check_lua_deps(${LUA_PRG} "${LUA_DEPENDENCIES}" LUA_PRG_WORKS)
 endif()
 
-execute_process(COMMAND ${LUA_PRG} -e "require('lpeg')"
-                RESULT_VARIABLE LUA_LPEG_MISSING
-                ERROR_QUIET)
-
-if(${LUA_LPEG_MISSING})
-  message(FATAL_ERROR
-          "The 'lpeg' lua package is required for building Neovim")
+if(NOT LUA_PRG_WORKS)
+  message(FATAL_ERROR "A suitable Lua interpreter was not found")
 endif()
 
-execute_process(COMMAND ${LUA_PRG} -e "require('cmsgpack')"
-                RESULT_VARIABLE LUA_MSGPACK_MISSING
-                ERROR_QUIET)
-
-if(${LUA_MSGPACK_MISSING})
-  message(FATAL_ERROR
-         "The 'cmsgpack' lua package is required for building Neovim")
-endif()
+message(STATUS "Using the Lua interpreter ${LUA_PRG}")
 
 add_subdirectory(config)
 add_subdirectory(src/nvim)
@@ -150,12 +147,18 @@ if(CMAKE_GENERATOR MATCHES "Makefiles")
 endif()
 
 if(NOT BUSTED_OUTPUT_TYPE)
-  set(BUSTED_OUTPUT_TYPE "utf_terminal")
+  set(BUSTED_OUTPUT_TYPE "utfTerminal")
 endif()
 
 if(BUSTED_PRG)
   get_property(TEST_INCLUDE_DIRS DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     PROPERTY INCLUDE_DIRECTORIES)
+
+  # Set policy CMP0026 to OLD so we avoid CMake warnings on newer
+  # versions of cmake.
+  if(POLICY CMP0026)
+    cmake_policy(SET CMP0026 OLD)
+  endif()
   get_target_property(TEST_LIBNVIM_PATH nvim-test LOCATION)
 
   configure_file(
@@ -173,6 +176,9 @@ if(BUSTED_PRG)
       -P ${CMAKE_MODULE_PATH}/RunUnittests.cmake
     DEPENDS nvim-test unittest-headers)
 endif()
+
+install(DIRECTORY runtime DESTINATION share/nvim)
+install(SCRIPT ${CMAKE_MODULE_PATH}/GenerateHelptags.cmake)
 
 # Unfortunately, the below does not work under Ninja.  Ninja doesn't use a
 # pseudo-tty when launching processes, because it can put many jobs in parallel

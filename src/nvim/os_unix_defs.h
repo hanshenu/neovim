@@ -24,10 +24,6 @@
 # include <unistd.h>
 #endif
 
-#ifdef HAVE_LIBC_H
-# include <libc.h>                  /* for NeXT */
-#endif
-
 #ifdef HAVE_SYS_PARAM_H
 # include <sys/param.h>     /* defines BSD, if it's a BSD system */
 #endif
@@ -41,17 +37,14 @@
 
 #ifdef SIGHASARG
 # ifdef SIGHAS3ARGS
-#  define SIGPROTOARG   (int, int, struct sigcontext *)
-#  define SIGDEFARG(s)  (s, sig2, scont) int s, sig2; struct sigcontext *scont;
+#  define SIGDEFARG(s)  (int s, int sig2, struct sigcontext *scont)
 #  define SIGDUMMYARG   0, 0, (struct sigcontext *)0
 # else
-#  define SIGPROTOARG   (int)
-#  define SIGDEFARG(s)  (s) int s;
+#  define SIGDEFARG(s)  (int s)
 #  define SIGDUMMYARG   0
 # endif
 #else
-# define SIGPROTOARG   (void)
-# define SIGDEFARG(s)  ()
+# define SIGDEFARG(s)  (void)
 # define SIGDUMMYARG
 #endif
 
@@ -206,9 +199,6 @@
 #   define DFLT_RUNTIMEPATH \
   "~/.nvim,$VIM/vimfiles,$VIMRUNTIME,$VIM/vimfiles/after,~/.nvim/after"
 #  endif
-
-#  define TEMPDIRNAMES  "$TMPDIR", "/tmp", ".", "$HOME"
-#  define TEMPNAMELEN    256
 
 /* Special wildcards that need to be handled by the shell */
 #define SPECIAL_WILDCHAR    "`'{"

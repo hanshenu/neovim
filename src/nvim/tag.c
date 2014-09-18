@@ -10,9 +10,13 @@
  * Code to handle tags and the tag stack
  */
 
+#include <errno.h>
+#include <inttypes.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/tag.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -876,7 +880,7 @@ do_tag (
           give_warning(IObuff, ic);
         if (ic && !msg_scrolled && msg_silent == 0) {
           out_flush();
-          ui_delay(1000L, TRUE);
+          ui_delay(1000L, true);
         }
       }
 
@@ -1512,13 +1516,8 @@ parse_line:
         if (orgpat.headlen
             ) {
           tagp.tagname = lbuf;
-#ifdef FEAT_TAG_ANYWHITE
-          tagp.tagname_end = skiptowhite(lbuf);
-          if (*tagp.tagname_end == NUL)
-#else
           tagp.tagname_end = vim_strchr(lbuf, TAB);
           if (tagp.tagname_end == NULL)
-#endif
           {
             if (vim_strchr(lbuf, NL) == NULL) {
               /* Truncated line, ignore it.  Has been reported for
@@ -1553,17 +1552,9 @@ parse_line:
           for (p = lbuf; p < tagp.tagname_end; ++p) {
             if (*p == ':') {
               if (tagp.fname == NULL)
-#ifdef FEAT_TAG_ANYWHITE
-                tagp.fname = skipwhite(tagp.tagname_end);
-#else
                 tagp.fname = tagp.tagname_end + 1;
-#endif
               if (       fnamencmp(lbuf, tagp.fname, p - lbuf) == 0
-#ifdef FEAT_TAG_ANYWHITE
-                         && vim_iswhite(tagp.fname[p - lbuf])
-#else
                          && tagp.fname[p - lbuf] == TAB
-#endif
                          ) {
                 /* found one */
                 tagp.tagname = p + 1;
@@ -1671,20 +1662,10 @@ parse_line:
            * Can be a matching tag, isolate the file name and command.
            */
           if (tagp.fname == NULL)
-#ifdef FEAT_TAG_ANYWHITE
-            tagp.fname = skipwhite(tagp.tagname_end);
-#else
             tagp.fname = tagp.tagname_end + 1;
-#endif
-#ifdef FEAT_TAG_ANYWHITE
-          tagp.fname_end = skiptowhite(tagp.fname);
-          tagp.command = skipwhite(tagp.fname_end);
-          if (*tagp.command == NUL)
-#else
           tagp.fname_end = vim_strchr(tagp.fname, TAB);
           tagp.command = tagp.fname_end + 1;
           if (tagp.fname_end == NULL)
-#endif
             i = FAIL;
           else
             i = OK;
@@ -2148,39 +2129,23 @@ parse_tag_line (
 
   /* Isolate the tagname, from lbuf up to the first white */
   tagp->tagname = lbuf;
-#ifdef FEAT_TAG_ANYWHITE
-  p = skiptowhite(lbuf);
-#else
   p = vim_strchr(lbuf, TAB);
   if (p == NULL)
     return FAIL;
-#endif
   tagp->tagname_end = p;
 
   /* Isolate file name, from first to second white space */
-#ifdef FEAT_TAG_ANYWHITE
-  p = skipwhite(p);
-#else
   if (*p != NUL)
     ++p;
-#endif
   tagp->fname = p;
-#ifdef FEAT_TAG_ANYWHITE
-  p = skiptowhite(p);
-#else
   p = vim_strchr(p, TAB);
   if (p == NULL)
     return FAIL;
-#endif
   tagp->fname_end = p;
 
   /* find start of search command, after second white space */
-#ifdef FEAT_TAG_ANYWHITE
-  p = skipwhite(p);
-#else
   if (*p != NUL)
     ++p;
-#endif
   if (*p == NUL)
     return FAIL;
   tagp->command = p;
@@ -2325,7 +2290,8 @@ jumpto_tag (
 {
   int save_secure;
   int save_magic;
-  int save_p_ws, save_p_scs, save_p_ic;
+  bool save_p_ws;
+  int save_p_scs, save_p_ic;
   linenr_T save_lnum;
   int csave = 0;
   char_u      *str;
@@ -2414,7 +2380,7 @@ jumpto_tag (
        * Make the preview window the current window.
        * Open a preview window when needed.
        */
-      prepare_tagpreview(TRUE);
+      prepare_tagpreview(true);
     }
   }
 
@@ -2476,7 +2442,7 @@ jumpto_tag (
       save_p_ws = p_ws;
       save_p_ic = p_ic;
       save_p_scs = p_scs;
-      p_ws = TRUE;              /* need 'wrapscan' for backward searches */
+      p_ws = true;              /* need 'wrapscan' for backward searches */
       p_ic = FALSE;             /* don't ignore case now */
       p_scs = FALSE;
       save_lnum = curwin->w_cursor.lnum;
@@ -2525,7 +2491,7 @@ jumpto_tag (
             MSG(_("E435: Couldn't find tag, just guessing!"));
             if (!msg_scrolled && msg_silent == 0) {
               out_flush();
-              ui_delay(1000L, TRUE);
+              ui_delay(1000L, true);
             }
           }
           retval = OK;
@@ -2580,7 +2546,7 @@ jumpto_tag (
       /* Return cursor to where we were */
       validate_cursor();
       redraw_later(VALID);
-      win_enter(curwin_save, TRUE);
+      win_enter(curwin_save, true);
     }
 
     --RedrawingDisabled;

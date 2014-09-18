@@ -11,9 +11,12 @@
  *	  op_change, op_yank, do_put, do_join
  */
 
+#include <inttypes.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/ops.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -44,6 +47,8 @@
 #include "nvim/ui.h"
 #include "nvim/undo.h"
 #include "nvim/window.h"
+#include "nvim/os/provider.h"
+#include "nvim/api/private/helpers.h"
 
 /*
  * Registers:
@@ -52,8 +57,9 @@
  * 10..35 = registers 'a' to 'z'
  *     36 = delete register '-'
  */
-#define NUM_REGISTERS 37
+#define NUM_REGISTERS 38
 #define DELETION_REGISTER 36
+#define CLIP_REGISTER 37
 
 /*
  * Each yank register is an array of pointers to lines.
@@ -343,7 +349,8 @@ static void shift_block(oparg_T *oap, int amount)
         ++bd.textstart;
     }
     for (; vim_iswhite(*bd.textstart); ) {
-      incr = lbr_chartabsize_adv(&bd.textstart, (colnr_T)(bd.start_vcol));
+      // TODO: is passing bd.textstart for start of the line OK?
+      incr = lbr_chartabsize_adv(bd.textstart, &bd.textstart, (colnr_T)(bd.start_vcol));
       total += incr;
       bd.start_vcol += incr;
     }
@@ -398,7 +405,7 @@ static void shift_block(oparg_T *oap, int amount)
     non_white_col = bd.start_vcol;
 
     while (vim_iswhite(*non_white)) {
-      incr = lbr_chartabsize_adv(&non_white, non_white_col);
+      incr = lbr_chartabsize_adv(bd.textstart, &non_white, non_white_col);
       non_white_col += incr;
     }
 
@@ -422,7 +429,10 @@ static void shift_block(oparg_T *oap, int amount)
     if (bd.startspaces)
       verbatim_copy_width -= bd.start_char_vcols;
     while (verbatim_copy_width < destination_col) {
-      incr = lbr_chartabsize(verbatim_copy_end, verbatim_copy_width);
+      char_u *line = verbatim_copy_end;
+
+      // TODO: is passing verbatim_copy_end for start of the line OK?
+      incr = lbr_chartabsize(line, verbatim_copy_end, verbatim_copy_width);
       if (verbatim_copy_width + incr > destination_col)
         break;
       verbatim_copy_width += incr;
@@ -708,6 +718,8 @@ valid_yank_reg (
              || regname == '"'
              || regname == '-'
              || regname == '_'
+             || regname == '*'
+             || regname == '+'
              )
     return TRUE;
   return FALSE;
@@ -740,6 +752,8 @@ void get_yank_register(int regname, int writing)
     y_append = TRUE;
   } else if (regname == '-')
     i = DELETION_REGISTER;
+  else if (regname == '*' || regname == '+')
+    i = CLIP_REGISTER;
   else                  /* not 0-9, a-z, A-Z or '-': use register 0 */
     i = 0;
   y_current = &(y_regs[i]);
@@ -759,6 +773,7 @@ get_register (
 ) FUNC_ATTR_NONNULL_RET
 {
   get_yank_register(name, 0);
+  get_clipboard(name);
 
   struct yankreg *reg = xmalloc(sizeof(struct yankreg));
   *reg = *y_current;
@@ -786,7 +801,7 @@ void put_register(int name, void *reg)
   free_yank_all();
   *y_current = *(struct yankreg *)reg;
   free(reg);
-
+  set_clipboard(name);
 }
 
 /*
@@ -926,6 +941,7 @@ do_execreg (
   }
   execreg_lastc = regname;
 
+  get_clipboard(regname);
 
   if (regname == '_')                   /* black hole: don't stuff anything */
     return OK;
@@ -1090,6 +1106,7 @@ insert_reg (
   if (regname != NUL && !valid_yank_reg(regname, FALSE))
     return FAIL;
 
+  get_clipboard(regname);
 
   if (regname == '.')                   /* insert last inserted text */
     retval = stuff_inserted(NUL, 1L, TRUE);
@@ -1133,10 +1150,7 @@ static void stuffescaped(char_u *arg, int literally)
      * stuff K_SPECIAL to get the effect of a special key when "literally"
      * is TRUE. */
     start = arg;
-    while ((*arg >= ' '
-            && *arg < DEL         /* EBCDIC: chars above space are normal */
-            )
-           || (*arg == K_SPECIAL && !literally))
+    while ((*arg >= ' ' && *arg < DEL) || (*arg == K_SPECIAL && !literally))
       ++arg;
     if (arg > start)
       stuffReadbuffLen(start, (long)(arg - start));
@@ -1275,6 +1289,17 @@ cmdline_paste_reg (
   return OK;
 }
 
+bool adjust_clipboard_register(int *rp)
+{
+  // If no reg. specified and 'unnamedclip' is set, use the
+  // clipboard register.
+  if (*rp == 0 && p_unc && provider_has_feature("clipboard")) {
+    *rp = '+';
+    return true;
+  }
+
+  return false;
+}
 
 /*
  * Handle a delete operation.
@@ -1304,6 +1329,7 @@ int op_delete(oparg_T *oap)
     return FAIL;
   }
 
+  bool adjusted = adjust_clipboard_register(&oap->regname);
 
   if (has_mbyte)
     mb_adjust_opend(oap);
@@ -1386,6 +1412,7 @@ int op_delete(oparg_T *oap)
     /* Yank into small delete register when no named register specified
      * and the delete is within one line. */
     if ((
+          adjusted ||
           oap->regname == 0) && oap->motion_type != MLINE
         && oap->line_count == 1) {
       oap->regname = '-';
@@ -2333,7 +2360,6 @@ int op_yank(oparg_T *oap, int deleting, int mess)
   if (oap->regname == '_')          /* black hole: nothing to do */
     return OK;
 
-
   if (!deleting)                    /* op_delete() already set y_current */
     get_yank_register(oap->regname, TRUE);
 
@@ -2482,6 +2508,9 @@ int op_yank(oparg_T *oap, int deleting, int mess)
     free(y_current->y_array);
     y_current = curr;
   }
+  if (curwin->w_p_rnu) {
+    redraw_later(SOME_VALID);  // cursor moved to start
+  }
   if (mess) {                   /* Display message about yank? */
     if (yanktype == MCHAR
         && !oap->block_mode
@@ -2515,6 +2544,8 @@ int op_yank(oparg_T *oap, int deleting, int mess)
     curbuf->b_op_start.col = 0;
     curbuf->b_op_end.col = MAXCOL;
   }
+
+  set_clipboard(oap->regname);
 
   return OK;
 }
@@ -2578,6 +2609,8 @@ do_put (
   int allocated = FALSE;
   long cnt;
 
+  adjust_clipboard_register(&regname);
+  get_clipboard(regname);
 
   if (flags & PUT_FIXINDENT)
     orig_indent = get_indent();
@@ -2794,7 +2827,7 @@ do_put (
       oldlen = (int)STRLEN(oldp);
       for (ptr = oldp; vcol < col && *ptr; ) {
         /* Count a tab for what it's worth (if list mode not on) */
-        incr = lbr_chartabsize_adv(&ptr, (colnr_T)vcol);
+        incr = lbr_chartabsize_adv(oldp, &ptr, (colnr_T)vcol);
         vcol += incr;
       }
       bd.textcol = (colnr_T)(ptr - oldp);
@@ -2824,7 +2857,7 @@ do_put (
       /* calculate number of spaces required to fill right side of block*/
       spaces = y_width + 1;
       for (j = 0; j < yanklen; j++)
-        spaces -= lbr_chartabsize(&y_array[i][j], 0);
+        spaces -= lbr_chartabsize(NULL, &y_array[i][j], 0);
       if (spaces < 0)
         spaces = 0;
 
@@ -3168,6 +3201,8 @@ void ex_display(exarg_T *eap)
         )
       continue;             /* did not ask for this register */
 
+    adjust_clipboard_register(&name);
+    get_clipboard(name);
 
     if (i == -1) {
       if (y_previous != NULL)
@@ -3662,17 +3697,15 @@ op_format (
   }
 
   if (oap->is_VIsual) {
-    win_T   *wp;
-
-    FOR_ALL_WINDOWS(wp)
-    {
+    FOR_ALL_WINDOWS(wp) {
       if (wp->w_old_cursor_lnum != 0) {
         /* When lines have been inserted or deleted, adjust the end of
          * the Visual area to be redrawn. */
-        if (wp->w_old_cursor_lnum > wp->w_old_visual_lnum)
+        if (wp->w_old_cursor_lnum > wp->w_old_visual_lnum) {
           wp->w_old_cursor_lnum += old_line_count;
-        else
+        } else {
           wp->w_old_visual_lnum += old_line_count;
+        }
       }
     }
   }
@@ -4082,7 +4115,7 @@ static void block_prep(oparg_T *oap, struct block_def *bdp, linenr_T lnum, int i
   prev_pstart = line;
   while (bdp->start_vcol < oap->start_vcol && *pstart) {
     /* Count a tab for what it's worth (if list mode not on) */
-    incr = lbr_chartabsize(pstart, (colnr_T)bdp->start_vcol);
+    incr = lbr_chartabsize(line, pstart, (colnr_T)bdp->start_vcol);
     bdp->start_vcol += incr;
     if (vim_iswhite(*pstart)) {
       bdp->pre_whitesp += incr;
@@ -4131,7 +4164,9 @@ static void block_prep(oparg_T *oap, struct block_def *bdp, linenr_T lnum, int i
       while (bdp->end_vcol <= oap->end_vcol && *pend != NUL) {
         /* Count a tab for what it's worth (if list mode not on) */
         prev_pend = pend;
-        incr = lbr_chartabsize_adv(&pend, (colnr_T)bdp->end_vcol);
+        // TODO: is passing prev_pend for start of the line OK?
+        // prehaps it should be "line"
+        incr = lbr_chartabsize_adv(prev_pend, &pend, (colnr_T)bdp->end_vcol);
         bdp->end_vcol += incr;
       }
       if (bdp->end_vcol <= oap->end_vcol
@@ -4525,6 +4560,9 @@ void write_viminfo_registers(FILE *fp)
   for (i = 0; i < NUM_REGISTERS; i++) {
     if (y_regs[i].y_array == NULL)
       continue;
+    // Skip '*'/'+' register, we don't want them back next time
+    if (i == CLIP_REGISTER)
+      continue;
     /* Skip empty registers. */
     num_lines = y_regs[i].y_size;
     if (num_lines == 0
@@ -4604,6 +4642,7 @@ char_u get_reg_type(int regname, long *reglen)
     return MCHAR;
   }
 
+  get_clipboard(regname);
 
   if (regname != NUL && !valid_yank_reg(regname, FALSE))
     return MAUTO;
@@ -4651,6 +4690,7 @@ get_reg_contents (
   if (regname != NUL && !valid_yank_reg(regname, FALSE))
     return NULL;
 
+  get_clipboard(regname);
 
   if (get_spec_reg(regname, &retval, &allocated, FALSE)) {
     if (retval == NULL)
@@ -5159,3 +5199,92 @@ void cursor_pos_info(void)
   }
 }
 
+static void free_register(struct yankreg *reg)
+{
+  // Save 'y_current' into 'curr'
+  struct yankreg *curr = y_current;
+  // Set it to 'y_current' since 'free_yank_all' operates on it
+  y_current = reg;
+  free_yank_all();
+  // Restore 'y_current'
+  y_current = curr;
+}
+
+static void copy_register(struct yankreg *dest, struct yankreg *src)
+{
+  free_register(dest);
+  *dest = *src;
+  dest->y_array = xcalloc(src->y_size, sizeof(uint8_t *));
+  for (int j = 0; j < src->y_size; ++j) {
+    dest->y_array[j] = (uint8_t *)xstrdup((char *)src->y_array[j]);
+  }
+}
+
+static void get_clipboard(int name)
+{
+  if (!(name == '*' || name == '+'
+        || (p_unc && !name && provider_has_feature("clipboard")))) {
+    return;
+  }
+
+  struct yankreg *reg = &y_regs[CLIP_REGISTER];
+  free_register(reg);
+  Array args = ARRAY_DICT_INIT;
+  Object result = provider_call("clipboard_get", args);
+
+  if (result.type != kObjectTypeArray) {
+    goto err;
+  }
+
+  Array lines = result.data.array;
+  reg->y_array = xcalloc(lines.size, sizeof(uint8_t *));
+  reg->y_size = lines.size;
+
+  for (size_t i = 0; i < lines.size; i++) {
+    if (lines.items[i].type != kObjectTypeString) {
+      goto err;
+    }
+    reg->y_array[i] = (uint8_t *)lines.items[i].data.string.data;
+  }
+
+  if (!name && p_unc) {
+    // copy to the unnamed register
+    copy_register(&y_regs[0], reg);
+  }
+
+  return;
+
+err:
+  api_free_object(result);
+  free(reg->y_array);
+  reg->y_array = NULL;
+  reg->y_size = 0;
+  EMSG("Clipboard provider returned invalid data");
+}
+
+static void set_clipboard(int name)
+{
+  if (!(name == '*' || name == '+'
+        || (p_unc && !name && provider_has_feature("clipboard")))) {
+    return;
+  }
+
+  struct yankreg *reg = &y_regs[CLIP_REGISTER];
+
+  if (!name && p_unc) {
+    // copy from the unnamed register
+    copy_register(reg, &y_regs[0]);
+  }
+
+  Array lines = ARRAY_DICT_INIT;
+
+  for (int i = 0; i < reg->y_size; i++) {
+    ADD(lines, STRING_OBJ(cstr_to_string((char *)reg->y_array[i])));
+  }
+
+  Array args = ARRAY_DICT_INIT;
+  ADD(args, ARRAY_OBJ(lines));
+
+  Object result = provider_call("clipboard_set", args);
+  api_free_object(result);
+}

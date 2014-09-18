@@ -31,11 +31,15 @@
  */
 
 #define IN_OPTION_C
+#include <errno.h>
+#include <inttypes.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/option.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -139,6 +143,7 @@
 # define PV_KMAP        OPT_BUF(BV_KMAP)
 #define PV_KP           OPT_BOTH(OPT_BUF(BV_KP))
 # define PV_LISP        OPT_BUF(BV_LISP)
+# define PV_LW          OPT_BOTH(OPT_BUF(BV_LW))
 #define PV_MA           OPT_BUF(BV_MA)
 #define PV_ML           OPT_BUF(BV_ML)
 #define PV_MOD          OPT_BUF(BV_MOD)
@@ -171,6 +176,8 @@
  */
 #define PV_LIST         OPT_WIN(WV_LIST)
 # define PV_ARAB        OPT_WIN(WV_ARAB)
+# define PV_BRI         OPT_WIN(WV_BRI)
+# define PV_BRIOPT      OPT_WIN(WV_BRIOPT)
 # define PV_DIFF        OPT_WIN(WV_DIFF)
 # define PV_FDC         OPT_WIN(WV_FDC)
 # define PV_FEN         OPT_WIN(WV_FEN)
@@ -465,6 +472,14 @@ static struct vimoption
   {"breakat",     "brk",  P_STRING|P_VI_DEF|P_RALL|P_FLAGLIST,
    (char_u *)&p_breakat, PV_NONE,
    {(char_u *)" \t!@*-+;:,./?", (char_u *)0L}
+   SCRIPTID_INIT},
+  {"breakindent",   "bri",  P_BOOL|P_VI_DEF|P_VIM|P_RWIN,
+   (char_u *)VAR_WIN, PV_BRI,
+   {(char_u *)FALSE, (char_u *)0L}
+   SCRIPTID_INIT},
+  {"breakindentopt", "briopt", P_STRING|P_ALLOCED|P_VI_DEF|P_RBUF|P_COMMA|P_NODUP,
+   (char_u *)VAR_WIN, PV_BRIOPT,
+   {(char_u *)"", (char_u *)NULL}
    SCRIPTID_INIT},
   {"browsedir",   "bsdir",P_STRING|P_VI_DEF,
    (char_u *)NULL, PV_NONE,
@@ -1047,7 +1062,7 @@ static struct vimoption
    (char_u *)&p_lisp, PV_LISP,
    {(char_u *)FALSE, (char_u *)0L} SCRIPTID_INIT},
   {"lispwords",   "lw",   P_STRING|P_VI_DEF|P_COMMA|P_NODUP,
-   (char_u *)&p_lispwords, PV_NONE,
+   (char_u *)&p_lispwords, PV_LW,
    {(char_u *)LISPWORD_VALUE, (char_u *)0L}
    SCRIPTID_INIT},
   {"list",        NULL,   P_BOOL|P_VI_DEF|P_RWIN,
@@ -1586,7 +1601,7 @@ static struct vimoption
    {(char_u *)TRUE, (char_u *)0L} SCRIPTID_INIT},
   {"ttyfast",     "tf",   P_BOOL|P_NO_MKRC|P_VI_DEF,
    (char_u *)&p_tf, PV_NONE,
-   {(char_u *)FALSE, (char_u *)0L} SCRIPTID_INIT},
+   {(char_u *)TRUE, (char_u *)0L} SCRIPTID_INIT},
   {"ttymouse",    "ttym", P_STRING|P_NODEFAULT|P_NO_MKRC|P_VI_DEF,
 #if defined(FEAT_MOUSE) && defined(UNIX)
    (char_u *)&p_ttym, PV_NONE,
@@ -1621,6 +1636,9 @@ static struct vimoption
   {"undoreload",  "ur",   P_NUM|P_VI_DEF,
    (char_u *)&p_ur, PV_NONE,
    { (char_u *)10000L, (char_u *)0L} SCRIPTID_INIT},
+  {"unnamedclip",  "ucp",   P_BOOL|P_VI_DEF|P_VIM,
+   (char_u *)&p_unc, PV_NONE,
+   {(char_u *)FALSE, (char_u *)FALSE} SCRIPTID_INIT},
   {"updatecount", "uc",   P_NUM|P_VI_DEF,
    (char_u *)&p_uc, PV_NONE,
    {(char_u *)200L, (char_u *)0L} SCRIPTID_INIT},
@@ -1920,26 +1938,15 @@ void set_init_1(void)
    */
   opt_idx = findoption((char_u *)"maxmemtot");
   if (opt_idx >= 0) {
-#ifndef HAVE_TOTAL_MEM
-    if (options[opt_idx].def_val[VI_DEFAULT] == (char_u *)0L)
-#endif
     {
-#ifdef HAVE_TOTAL_MEM
       /* Use half of amount of memory available to Vim. */
       /* If too much to fit in long_u, get long_u max */
       uint64_t available_kib = os_get_total_mem_kib();
       n = available_kib / 2 > ULONG_MAX ? ULONG_MAX
                                         : (long_u)(available_kib /2);
-#else
-      n = (0x7fffffff >> 11);
-#endif
       options[opt_idx].def_val[VI_DEFAULT] = (char_u *)n;
       opt_idx = findoption((char_u *)"maxmem");
       if (opt_idx >= 0) {
-#ifndef HAVE_TOTAL_MEM
-        if ((long)options[opt_idx].def_val[VI_DEFAULT] > (long)n
-            || (long)options[opt_idx].def_val[VI_DEFAULT] == 0L)
-#endif
         options[opt_idx].def_val[VI_DEFAULT] = (char_u *)n;
       }
     }
@@ -1982,7 +1989,7 @@ void set_init_1(void)
     }
   }
 
-#if defined(MSWIN) || defined(EBCDIC) || defined(MAC)
+#if defined(MSWIN) || defined(MAC)
   /* Set print encoding on platforms that don't default to latin1 */
   set_string_default("penc",
       (char_u *)"hp-roman8"
@@ -2356,7 +2363,6 @@ void set_init_3(void)
    * This is done after other initializations, where 'shell' might have been
    * set, but only if they have not been set before.
    */
-  char_u  *p;
   int idx_srr;
   int do_srr;
   int idx_sp;
@@ -2373,28 +2379,10 @@ void set_init_3(void)
   else
     do_sp = !(options[idx_sp].flags & P_WAS_SET);
 
-  /*
-   * Isolate the name of the shell:
-   * - Skip beyond any path.  E.g., "/usr/bin/csh -f" -> "csh -f".
-   * - Remove any argument.  E.g., "csh -f" -> "csh".
-   * But don't allow a space in the path, so that this works:
-   *   "/usr/bin/csh --rcfile ~/.cshrc"
-   * But don't do that for Windows, it's common to have a space in the path.
-   */
-  p = skiptowhite(p_sh);
-  if (*p == NUL) {
-    /* No white space, use the tail. */
-    p = vim_strsave(path_tail(p_sh));
-  } else {
-    char_u  *p1, *p2;
+  size_t len = 0;
+  char_u *p = (char_u *)invocation_path_tail(p_sh, &len);
+  p = vim_strnsave(p, len);
 
-    /* Find the last path separator before the space. */
-    p1 = p_sh;
-    for (p2 = p_sh; p2 < p; mb_ptr_adv(p2))
-      if (vim_ispathsep(*p2))
-        p1 = p2 + 1;
-    p = vim_strnsave(p1, (int)(p - p1));
-  }
   {
     /*
      * Default for p_sp is "| tee", for p_srr is ">".
@@ -2418,6 +2406,7 @@ void set_init_3(void)
                       || fnamecmp(p, "zsh") == 0
                       || fnamecmp(p, "zsh-beta") == 0
                       || fnamecmp(p, "bash") == 0
+                      || fnamecmp(p, "fish") == 0
                       ) {
       if (do_sp) {
         p_sp = (char_u *)"2>&1| tee";
@@ -3496,6 +3485,7 @@ static void didset_options(void)
   (void)compile_cap_prog(curwin->w_s);
   /* set cedit_key */
   (void)check_cedit();
+  briopt_check();
 }
 
 /*
@@ -3556,6 +3546,7 @@ void check_buf_options(buf_T *buf)
   check_string_option(&buf->b_p_tags);
   check_string_option(&buf->b_p_dict);
   check_string_option(&buf->b_p_tsr);
+  check_string_option(&buf->b_p_lw);
 }
 
 /*
@@ -3828,6 +3819,11 @@ did_set_string_option (
     if (STRCMP(*p_bex == '.' ? p_bex + 1 : p_bex,
             *p_pm == '.' ? p_pm + 1 : p_pm) == 0)
       errmsg = (char_u *)N_("E589: 'backupext' and 'patchmode' are equal");
+  }
+  /* 'breakindentopt' */
+  else if (varp == &curwin->w_p_briopt) {
+    if (briopt_check() == FAIL)
+      errmsg = e_invarg;
   }
   /*
    * 'isident', 'iskeyword', 'isprint or 'isfname' option: refill chartab[]
@@ -4304,7 +4300,6 @@ did_set_string_option (
   /* When 'spelllang' or 'spellfile' is set and there is a window for this
    * buffer in which 'spell' is set load the wordlists. */
   else if (varp == &(curbuf->b_s.b_p_spl) || varp == &(curbuf->b_s.b_p_spf)) {
-    win_T       *wp;
     int l;
 
     if (varp == &(curbuf->b_s.b_p_spf)) {
@@ -4315,10 +4310,11 @@ did_set_string_option (
     }
 
     if (errmsg == NULL) {
-      FOR_ALL_WINDOWS(wp)
-      if (wp->w_buffer == curbuf && wp->w_p_spell) {
-        errmsg = did_set_spelllang(wp);
-        break;
+      FOR_ALL_WINDOWS(wp) {
+        if (wp->w_buffer == curbuf && wp->w_p_spell) {
+          errmsg = did_set_spelllang(wp);
+          break;
+        }
       }
     }
   }
@@ -5012,7 +5008,7 @@ set_bool_option (
         NULL, NULL, TRUE, curbuf);
   }
   /* when 'swf' is set, create swapfile, when reset remove swapfile */
-  else if ((int *)varp == &curbuf->b_p_swf) {
+  else if ((int *)varp == (int *)&curbuf->b_p_swf) {
     if (curbuf->b_p_swf && p_uc)
       ml_open_file(curbuf);                     /* create the swap file */
     else
@@ -5073,9 +5069,7 @@ set_bool_option (
   /* There can be only one window with 'previewwindow' set. */
   else if ((int *)varp == &curwin->w_p_pvw) {
     if (curwin->w_p_pvw) {
-      win_T       *win;
-
-      for (win = firstwin; win != NULL; win = win->w_next) {
+      FOR_ALL_WINDOWS(win) {
         if (win->w_p_pvw && win != curwin) {
           curwin->w_p_pvw = FALSE;
           return (char_u *)N_("E590: A preview window already exists");
@@ -6530,10 +6524,13 @@ void comp_col(void)
 void unset_global_local_option(char *name, void *from)
 {
   struct vimoption *p;
-  int opt_idx;
   buf_T *buf = (buf_T *)from;
 
-  opt_idx = findoption((uint8_t *)name);
+  int opt_idx = findoption((uint8_t *)name);
+  if (opt_idx < 0) {
+    EMSG2(_("E355: Unknown option: %s"), name);
+    return;
+  }
   p = &(options[opt_idx]);
 
   switch ((int)p->indir)
@@ -6581,6 +6578,9 @@ void unset_global_local_option(char *name, void *from)
     case PV_UL:
       buf->b_p_ul = NO_LOCAL_UNDOLEVEL;
       break;
+    case PV_LW:
+      clear_string_option(&buf->b_p_lw);
+      break;
   }
 }
 
@@ -6610,6 +6610,7 @@ static char_u *get_varp_scope(struct vimoption *p, int opt_flags)
     case PV_TSR:  return (char_u *)&(curbuf->b_p_tsr);
     case PV_STL:  return (char_u *)&(curwin->w_p_stl);
     case PV_UL:   return (char_u *)&(curbuf->b_p_ul);
+    case PV_LW:   return (char_u *)&(curbuf->b_p_lw);
     }
     return NULL;     /* "cannot happen" */
   }
@@ -6657,6 +6658,8 @@ static char_u *get_varp(struct vimoption *p)
            ? (char_u *)&(curwin->w_p_stl) : p->var;
   case PV_UL:     return curbuf->b_p_ul != NO_LOCAL_UNDOLEVEL
            ? (char_u *)&(curbuf->b_p_ul) : p->var;
+  case PV_LW:   return *curbuf->b_p_lw != NUL
+           ? (char_u *)&(curbuf->b_p_lw) : p->var;
 
   case PV_ARAB:   return (char_u *)&(curwin->w_p_arab);
   case PV_LIST:   return (char_u *)&(curwin->w_p_list);
@@ -6686,6 +6689,8 @@ static char_u *get_varp(struct vimoption *p)
   case PV_SCROLL: return (char_u *)&(curwin->w_p_scr);
   case PV_WRAP:   return (char_u *)&(curwin->w_p_wrap);
   case PV_LBR:    return (char_u *)&(curwin->w_p_lbr);
+  case PV_BRI:    return (char_u *)&(curwin->w_p_bri);
+  case PV_BRIOPT: return (char_u *)&(curwin->w_p_briopt);
   case PV_SCBIND: return (char_u *)&(curwin->w_p_scb);
   case PV_CRBIND: return (char_u *)&(curwin->w_p_crb);
   case PV_COCU:    return (char_u *)&(curwin->w_p_cocu);
@@ -6793,6 +6798,8 @@ void copy_winopt(winopt_T *from, winopt_T *to)
   to->wo_wrap = from->wo_wrap;
   to->wo_wrap_save = from->wo_wrap_save;
   to->wo_lbr = from->wo_lbr;
+  to->wo_bri = from->wo_bri;
+  to->wo_briopt = vim_strsave(from->wo_briopt);
   to->wo_scb = from->wo_scb;
   to->wo_scb_save = from->wo_scb_save;
   to->wo_crb = from->wo_crb;
@@ -6835,7 +6842,7 @@ void check_win_options(win_T *win)
 /*
  * Check for NULL pointers in a winopt_T and replace them with empty_option.
  */
-void check_winopt(winopt_T *wop)
+static void check_winopt(winopt_T *wop)
 {
   check_string_option(&wop->wo_fdi);
   check_string_option(&wop->wo_fdm);
@@ -6847,6 +6854,7 @@ void check_winopt(winopt_T *wop)
   check_string_option(&wop->wo_stl);
   check_string_option(&wop->wo_cc);
   check_string_option(&wop->wo_cocu);
+  check_string_option(&wop->wo_briopt);
 }
 
 /*
@@ -6864,6 +6872,7 @@ void clear_winopt(winopt_T *wop)
   clear_string_option(&wop->wo_stl);
   clear_string_option(&wop->wo_cc);
   clear_string_option(&wop->wo_cocu);
+  clear_string_option(&wop->wo_briopt);
 }
 
 /*
@@ -7009,6 +7018,7 @@ void buf_copy_options(buf_T *buf, int flags)
       buf->b_p_tsr = empty_option;
       buf->b_p_qe = vim_strsave(p_qe);
       buf->b_p_udf = p_udf;
+      buf->b_p_lw = empty_option;
 
       /*
        * Don't copy the options set by ex_help(), use the saved values,
@@ -7681,7 +7691,6 @@ static void paste_option_changed(void)
   static int save_ru = 0;
   static int save_ri = 0;
   static int save_hkmap = 0;
-  buf_T       *buf;
 
   if (p_paste) {
     /*
@@ -7690,7 +7699,7 @@ static void paste_option_changed(void)
      */
     if (!old_p_paste) {
       /* save options for each buffer */
-      for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+      FOR_ALL_BUFFERS(buf) {
         buf->b_p_tw_nopaste = buf->b_p_tw;
         buf->b_p_wm_nopaste = buf->b_p_wm;
         buf->b_p_sts_nopaste = buf->b_p_sts;
@@ -7714,7 +7723,7 @@ static void paste_option_changed(void)
      * already on.
      */
     /* set options for each buffer */
-    for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+    FOR_ALL_BUFFERS(buf) {
       buf->b_p_tw = 0;              /* textwidth is 0 */
       buf->b_p_wm = 0;              /* wrapmargin is 0 */
       buf->b_p_sts = 0;             /* softtabstop is 0 */
@@ -7739,7 +7748,7 @@ static void paste_option_changed(void)
    */
   else if (old_p_paste) {
     /* restore options for each buffer */
-    for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+    FOR_ALL_BUFFERS(buf) {
       buf->b_p_tw = buf->b_p_tw_nopaste;
       buf->b_p_wm = buf->b_p_wm_nopaste;
       buf->b_p_sts = buf->b_p_sts_nopaste;
@@ -8139,3 +8148,45 @@ void find_mps_values(int *initc, int *findc, int *backwards, int switchit)
       ++ptr;
   }
 }
+
+/* This is called when 'breakindentopt' is changed and when a window is
+   initialized */
+int briopt_check(void) 
+{
+  char_u	*p;
+  int bri_shift = 0;
+  long bri_min = 20;
+  bool bri_sbr = false;
+
+  p = curwin->w_p_briopt;
+  while (*p != NUL)
+  {
+    if (STRNCMP(p, "shift:", 6) == 0
+        && ((p[6] == '-' && VIM_ISDIGIT(p[7])) || VIM_ISDIGIT(p[6])))
+    {
+      p += 6;
+      bri_shift = getdigits(&p);
+    }
+    else if (STRNCMP(p, "min:", 4) == 0 && VIM_ISDIGIT(p[4]))
+    {
+      p += 4;
+      bri_min = getdigits(&p);
+    }
+    else if (STRNCMP(p, "sbr", 3) == 0)
+    {
+      p += 3;
+      bri_sbr = true;
+    }
+    if (*p != ',' && *p != NUL)
+      return FAIL;
+    if (*p == ',')
+      ++p;
+  }
+
+  curwin->w_p_brishift = bri_shift;
+  curwin->w_p_brimin   = bri_min;
+  curwin->w_p_brisbr   = bri_sbr;
+
+  return OK;
+}
+

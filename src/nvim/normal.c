@@ -11,10 +11,14 @@
  *		the operators.
  */
 
+#include <errno.h>
+#include <inttypes.h>
 #include <string.h>
+#include <stdbool.h>
 #include <stdlib.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/normal.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -919,6 +923,7 @@ getcount:
 
       /* Adjust the register according to 'clipboard', so that when
        * "unnamed" is present it becomes '*' or '+' instead of '"'. */
+      adjust_clipboard_register(&regname);
       set_reg_var(regname);
     }
   }
@@ -992,8 +997,8 @@ getcount:
     cursor_on();
     out_flush();
     if (msg_scroll || emsg_on_display)
-      ui_delay(1000L, TRUE);            /* wait at least one second */
-    ui_delay(3000L, FALSE);             /* wait up to three seconds */
+      ui_delay(1000L, true);            /* wait at least one second */
+    ui_delay(3000L, false);             /* wait up to three seconds */
     State = save_State;
 
     msg_scroll = FALSE;
@@ -3273,7 +3278,7 @@ find_decl (
   pos_T par_pos;
   pos_T found_pos;
   int t;
-  int save_p_ws;
+  bool save_p_ws;
   int save_p_scs;
   int retval = OK;
   int incll;
@@ -3287,7 +3292,7 @@ find_decl (
   old_pos = curwin->w_cursor;
   save_p_ws = p_ws;
   save_p_scs = p_scs;
-  p_ws = FALSE;         /* don't wrap around end of file now */
+  p_ws = false;         /* don't wrap around end of file now */
   p_scs = FALSE;        /* don't switch ignorecase off now */
 
   /*
@@ -4003,12 +4008,9 @@ dozet:
 
   /* Redraw when 'foldenable' changed */
   if (old_fen != curwin->w_p_fen) {
-    win_T       *wp;
-
     if (foldmethodIsDiff(curwin) && curwin->w_p_scb) {
       /* Adjust 'foldenable' in diff-synced windows. */
-      FOR_ALL_WINDOWS(wp)
-      {
+      FOR_ALL_WINDOWS(wp) {
         if (wp != curwin && foldmethodIsDiff(wp) && wp->w_p_scb) {
           wp->w_p_fen = curwin->w_p_fen;
           changed_window_setting_win(wp);
@@ -5097,6 +5099,7 @@ static void nv_brackets(cmdarg_T *cap)
         end = equalpos(start, VIsual) ? curwin->w_cursor : VIsual;
         curwin->w_cursor = (dir == BACKWARD ? start : end);
       }
+      adjust_clipboard_register(&regname);
       prep_redo_cmd(cap);
       do_put(regname, dir, cap->count1, PUT_FIXINDENT);
       if (was_visual) {
@@ -6709,7 +6712,7 @@ static void nv_bck_word(cmdarg_T *cap)
 static void nv_wordcmd(cmdarg_T *cap)
 {
   int n;
-  int word_end;
+  bool word_end;
   int flag = FALSE;
   pos_T startpos = curwin->w_cursor;
 
@@ -6717,9 +6720,9 @@ static void nv_wordcmd(cmdarg_T *cap)
    * Set inclusive for the "E" and "e" command.
    */
   if (cap->cmdchar == 'e' || cap->cmdchar == 'E')
-    word_end = TRUE;
+    word_end = true;
   else
-    word_end = FALSE;
+    word_end = false;
   cap->oap->inclusive = word_end;
 
   /*
@@ -6753,7 +6756,7 @@ static void nv_wordcmd(cmdarg_T *cap)
          * flag.
          */
         cap->oap->inclusive = TRUE;
-        word_end = TRUE;
+        word_end = true;
         flag = TRUE;
       }
     }
@@ -7263,9 +7266,10 @@ static void nv_put(cmdarg_T *cap)
        */
       was_visual = TRUE;
       regname = cap->oap->regname;
+      bool adjusted = adjust_clipboard_register(&regname);
       if (regname == 0 || regname == '"'
           || VIM_ISDIGIT(regname) || regname == '-'
-
+          || adjusted
           ) {
         /* The delete is going to overwrite the register we want to
          * put, save it first. */
@@ -7368,5 +7372,5 @@ static void nv_cursorhold(cmdarg_T *cap)
 
 static void nv_event(cmdarg_T *cap)
 {
-  event_process(true);
+  event_process();
 }

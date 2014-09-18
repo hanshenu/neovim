@@ -2,6 +2,12 @@
 #define NVIM_NORMAL_H
 
 #include "nvim/pos.h"
+#include "nvim/buffer_defs.h"  // for win_T
+
+/* Values for find_ident_under_cursor() */
+#define FIND_IDENT      1       /* find identifier (word) */
+#define FIND_STRING     2       /* find any string (WORD) */
+#define FIND_EVAL       4       /* include "->", "[]" and "." */
 
 /*
  * Arguments for operators.

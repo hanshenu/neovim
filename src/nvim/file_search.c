@@ -44,9 +44,13 @@
  *	functions.
  */
 
+#include <errno.h>
 #include <string.h>
+#include <stdbool.h>
+#include <inttypes.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/file_search.h"
 #include "nvim/charset.h"
 #include "nvim/fileio.h"
@@ -405,7 +409,6 @@ vim_findfile_init (
      * The octet after a '**' is used as a (binary) counter.
      * So '**3' is transposed to '**^C' ('^C' is ASCII value 3)
      * or '**76' is transposed to '**N'( 'N' is ASCII value 76).
-     * For EBCDIC you get different character values.
      * If no restrict is given after '**' the default is used.
      * Due to this technique the path looks awful if you print it as a
      * string.
@@ -1094,7 +1097,7 @@ static int ff_check_visited(ff_visited_T **visited_list, char_u *fname, char_u *
     url = true;
   } else {
     ff_expand_buffer[0] = NUL;
-    if (!os_get_file_id((char *)fname, &file_id)) {
+    if (!os_fileid((char *)fname, &file_id)) {
       return FAIL;
     }
   }
@@ -1103,7 +1106,7 @@ static int ff_check_visited(ff_visited_T **visited_list, char_u *fname, char_u *
   for (vp = *visited_list; vp != NULL; vp = vp->ffv_next) {
     if ((url && fnamecmp(vp->ffv_fname, ff_expand_buffer) == 0)
         || (!url && vp->file_id_valid
-            && os_file_id_equal(&(vp->file_id), &file_id))) {
+            && os_fileid_equal(&(vp->file_id), &file_id))) {
       /* are the wildcard parts equal */
       if (ff_wc_equal(vp->ffv_wc_path, wc_path) == TRUE)
         /* already visited */

@@ -10,10 +10,14 @@
  * ex_cmds.c: some functions for command line commands
  */
 
+#include <errno.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/version_defs.h"
 #include "nvim/ex_cmds.h"
 #include "nvim/buffer.h"
@@ -55,6 +59,7 @@
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
 #include "nvim/tag.h"
+#include "nvim/tempfile.h"
 #include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/undo.h"
@@ -1028,8 +1033,8 @@ do_filter (
     curbuf->b_op_start.lnum = line1;
     curbuf->b_op_end.lnum = line2;
     curwin->w_cursor.lnum = line2;
-  } else if ((do_in && (itmp = vim_tempname('i')) == NULL)
-      || (do_out && (otmp = vim_tempname('o')) == NULL)) {
+  } else if ((do_in && (itmp = vim_tempname()) == NULL)
+      || (do_out && (otmp = vim_tempname()) == NULL)) {
     EMSG(_(e_notmp));
     goto filterend;
   }
@@ -1206,7 +1211,6 @@ do_shell (
     int flags              /* may be SHELL_DOOUT when output is redirected */
 )
 {
-  buf_T       *buf;
   int save_nwr;
 
   /*
@@ -1234,11 +1238,12 @@ do_shell (
   if (p_warn
       && !autocmd_busy
       && msg_silent == 0)
-    for (buf = firstbuf; buf; buf = buf->b_next)
+    FOR_ALL_BUFFERS(buf) {
       if (bufIsChanged(buf)) {
         MSG_PUTS(_("[No write since last change]\n"));
         break;
       }
+    }
 
   /* This windgoto is required for when the '\n' resulted in a "delete line
    * 1" command to the terminal. */
@@ -1302,52 +1307,58 @@ do_shell (
   apply_autocmds(EVENT_SHELLCMDPOST, NULL, NULL, FALSE, curbuf);
 }
 
-/*
- * Create a shell command from a command string, input redirection file and
- * output redirection file.
- * Returns an allocated string with the shell command.
- */
-char_u *
-make_filter_cmd (
-    char_u *cmd,               /* command */
-    char_u *itmp,              /* NULL or name of input file */
-    char_u *otmp              /* NULL or name of output file */
-)
+/// Create a shell command from a command string, input redirection file and
+/// output redirection file.
+///
+/// @param cmd  Command to execute.
+/// @param itmp NULL or the input file.
+/// @param otmp NULL or the output file.
+/// @returns an allocated string with the shell command.
+char_u *make_filter_cmd(char_u *cmd, char_u *itmp, char_u *otmp)
 {
-  size_t len = STRLEN(cmd) + 3;                        /* "()" + NUL */
+  bool is_fish_shell =
+#if defined(UNIX)
+    STRNCMP(invocation_path_tail(p_sh, NULL), "fish", 4) == 0;
+#else
+    false;
+#endif
+
+  size_t len = STRLEN(cmd) + 1;  // At least enough space for cmd + NULL.
+  
+  len += is_fish_shell ?  sizeof("begin; ""; end") - 1
+                       :  sizeof("("")") - 1;
+
   if (itmp != NULL)
-    len += STRLEN(itmp) + 9;                    /* " { < " + " } " */
+    len += STRLEN(itmp) + sizeof(" { "" < "" } ") - 1;
   if (otmp != NULL)
-    len += STRLEN(otmp) + STRLEN(p_srr) + 2;     /* "  " */
+    len += STRLEN(otmp) + STRLEN(p_srr) + 2;  // two extra spaces ("  "),
   char_u *buf = xmalloc(len);
 
 #if defined(UNIX)
-  /*
-   * Put braces around the command (for concatenated commands) when
-   * redirecting input and/or output.
-   */
-  if (itmp != NULL || otmp != NULL)
-    vim_snprintf((char *)buf, len, "(%s)", (char *)cmd);
-  else
+  // Put delimiters around the command (for concatenated commands) when
+  // redirecting input and/or output.
+  if (itmp != NULL || otmp != NULL) {
+    char *fmt = is_fish_shell ? "begin; %s; end"
+                              :       "(%s)";
+    vim_snprintf((char *)buf, len, fmt, (char *)cmd);
+  } else {
     STRCPY(buf, cmd);
+  }
+
   if (itmp != NULL) {
     STRCAT(buf, " < ");
     STRCAT(buf, itmp);
   }
 #else
-  /*
-   * for shells that don't understand braces around commands, at least allow
-   * the use of commands in a pipe.
-   */
+  // For shells that don't understand braces around commands, at least allow
+  // the use of commands in a pipe.
   STRCPY(buf, cmd);
   if (itmp != NULL) {
     char_u  *p;
 
-    /*
-     * If there is a pipe, we have to put the '<' in front of it.
-     * Don't do this when 'shellquote' is not empty, otherwise the
-     * redirection would be inside the quotes.
-     */
+    // If there is a pipe, we have to put the '<' in front of it.
+    // Don't do this when 'shellquote' is not empty, otherwise the
+    // redirection would be inside the quotes.
     if (*p_shq == NUL) {
       p = vim_strchr(buf, '|');
       if (p != NULL)
@@ -1358,7 +1369,7 @@ make_filter_cmd (
     if (*p_shq == NUL) {
       p = vim_strchr(cmd, '|');
       if (p != NULL) {
-        STRCAT(buf, " ");           /* insert a space before the '|' for DOS */
+        STRCAT(buf, " ");  // Insert a space before the '|' for DOS
         STRCAT(buf, p);
       }
     }
@@ -1522,7 +1533,7 @@ void write_viminfo(char_u *file, int forceit)
      */
 
     FileInfo old_info;  // FileInfo of existing viminfo file
-    if (os_get_file_info((char *)fname, &old_info)
+    if (os_fileinfo((char *)fname, &old_info)
         && getuid() != ROOT_UID
         && !(old_info.stat.st_uid == getuid()
              ? (old_info.stat.st_mode & 0200)
@@ -1571,19 +1582,19 @@ void write_viminfo(char_u *file, int forceit)
     if (tempname != NULL) {
       int fd;
 
-      /* Use mch_open() to be able to use O_NOFOLLOW and set file
+      /* Use os_open() to be able to use O_NOFOLLOW and set file
        * protection:
        * Unix: same as original file, but strip s-bit.  Reset umask to
        * avoid it getting in the way.
        * Others: r&w for user only. */
 # ifdef UNIX
       umask_save = umask(0);
-      fd = mch_open((char *)tempname,
+      fd = os_open((char *)tempname,
           O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW,
           (int)((old_info.stat.st_mode & 0777) | 0600));
       (void)umask(umask_save);
 # else
-      fd = mch_open((char *)tempname,
+      fd = os_open((char *)tempname,
           O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW, 0600);
 # endif
       if (fd < 0)
@@ -1597,17 +1608,17 @@ void write_viminfo(char_u *file, int forceit)
        */
       if (fp_out == NULL) {
         free(tempname);
-        if ((tempname = vim_tempname('o')) != NULL)
+        if ((tempname = vim_tempname()) != NULL)
           fp_out = mch_fopen((char *)tempname, WRITEBIN);
       }
 
-#if defined(UNIX) && defined(HAVE_FCHOWN)
+#ifdef UNIX
       /*
        * Make sure the owner can read/write it.  This only works for
        * root.
        */
       if (fp_out != NULL) {
-        fchown(fileno(fp_out), old_info.stat.st_uid, old_info.stat.st_gid);
+        os_fchown(fileno(fp_out), old_info.stat.st_uid, old_info.stat.st_gid);
       }
 #endif
     }
@@ -1742,7 +1753,6 @@ static void do_viminfo(FILE *fp_in, FILE *fp_out, int flags)
 static int read_viminfo_up_to_marks(vir_T *virp, int forceit, int writing)
 {
   int eof;
-  buf_T       *buf;
 
   prepare_viminfo_history(forceit ? 9999 : 0, writing);
   eof = viminfo_readline(virp);
@@ -1805,8 +1815,9 @@ static int read_viminfo_up_to_marks(vir_T *virp, int forceit, int writing)
     finish_viminfo_history();
 
   /* Change file names to buffer numbers for fmarks. */
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next)
+  FOR_ALL_BUFFERS(buf) {
     fmarks_check_names(buf);
+  }
 
   return eof;
 }
@@ -1928,7 +1939,7 @@ void viminfo_writestring(FILE *fd, char_u *p)
    * the string (e.g., variable name).  Add something to the length for the
    * '<', NL and trailing NUL. */
   if (len > LSIZE / 2)
-    fprintf(fd, IF_EB("\026%d\n<", CTRL_V_STR "%d\n<"), len + 3);
+    fprintf(fd, "\026%d\n<", len + 3);
 
   while ((c = *p++) != NUL) {
     if (c == Ctrl_V || c == '\n') {
@@ -2351,14 +2362,13 @@ void ex_wnext(exarg_T *eap)
  */
 void do_wqall(exarg_T *eap)
 {
-  buf_T       *buf;
   int error = 0;
   int save_forceit = eap->forceit;
 
   if (eap->cmdidx == CMD_xall || eap->cmdidx == CMD_wqall)
     exiting = TRUE;
 
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+  FOR_ALL_BUFFERS(buf) {
     if (bufIsChanged(buf)) {
       /*
        * Check if there is a reason the buffer cannot be written:
@@ -3445,7 +3455,7 @@ void do_sub(exarg_T *eap)
   regmmatch_T regmatch;
   static int do_all = FALSE;            /* do multiple substitutions per line */
   static int do_ask = FALSE;            /* ask for confirmation */
-  static int do_count = FALSE;          /* count only */
+  static bool do_count = false;         /* count only */
   static int do_error = TRUE;           /* if false, ignore errors */
   static int do_print = FALSE;          /* print last line with subs. */
   static int do_list = FALSE;           /* list last line with subs. */
@@ -3584,7 +3594,7 @@ void do_sub(exarg_T *eap)
 
     do_join(eap->line2 - eap->line1 + 1, FALSE, TRUE, FALSE, true);
     sub_nlines = sub_nsubs = eap->line2 - eap->line1 + 1;
-    do_sub_msg(FALSE);
+    do_sub_msg(false);
     ex_may_print(eap);
 
     return;
@@ -3605,7 +3615,7 @@ void do_sub(exarg_T *eap)
     }
     do_error = TRUE;
     do_print = FALSE;
-    do_count = FALSE;
+    do_count = false;
     do_number = FALSE;
     do_ic = 0;
   }
@@ -3619,7 +3629,7 @@ void do_sub(exarg_T *eap)
     else if (*cmd == 'c')
       do_ask = !do_ask;
     else if (*cmd == 'n')
-      do_count = TRUE;
+      do_count = true;
     else if (*cmd == 'e')
       do_error = !do_error;
     else if (*cmd == 'r')           /* use last used regexp */
@@ -4355,9 +4365,9 @@ skip:
  * Can also be used after a ":global" command.
  * Return TRUE if a message was given.
  */
-int 
+bool
 do_sub_msg (
-    int count_only                 /* used 'n' flag for ":s" */
+    bool count_only                /* used 'n' flag for ":s" */
 )
 {
   /*
@@ -4390,13 +4400,13 @@ do_sub_msg (
     if (msg(msg_buf))
       /* save message to display it after redraw */
       set_keep_msg(msg_buf, 0);
-    return TRUE;
+    return true;
   }
   if (got_int) {
     EMSG(_(e_interr));
-    return TRUE;
+    return true;
   }
-  return FALSE;
+  return false;
 }
 
 /*
@@ -4562,7 +4572,7 @@ void global_exe(char_u *cmd)
    * number of extra or deleted lines.
    * Don't report extra or deleted lines in the edge case where the buffer
    * we are in after execution is different from the buffer we started in. */
-  if (!do_sub_msg(FALSE) && curbuf == old_buf)
+  if (!do_sub_msg(false) && curbuf == old_buf)
     msgmore(curbuf->b_ml.ml_line_count - old_lcount);
 }
 
@@ -4595,40 +4605,40 @@ void free_old_sub(void)
  * Set up for a tagpreview.
  * Return TRUE when it was created.
  */
-int 
+bool
 prepare_tagpreview (
-    int undo_sync                  /* sync undo when leaving the window */
+    bool undo_sync                  /* sync undo when leaving the window */
 )
 {
-  win_T       *wp;
-
-
   /*
    * If there is already a preview window open, use that one.
    */
   if (!curwin->w_p_pvw) {
-    for (wp = firstwin; wp != NULL; wp = wp->w_next)
-      if (wp->w_p_pvw)
+    bool found_win = false;
+    FOR_ALL_WINDOWS(wp) {
+      if (wp->w_p_pvw) {
+        win_enter(wp, undo_sync);
+        found_win = true;
         break;
-    if (wp != NULL)
-      win_enter(wp, undo_sync);
-    else {
+      }
+    }
+    if (!found_win) {
       /*
        * There is no preview window open yet.  Create one.
        */
       if (win_split(g_do_tagpreview > 0 ? g_do_tagpreview : 0, 0)
           == FAIL)
-        return FALSE;
+        return false;
       curwin->w_p_pvw = TRUE;
       curwin->w_p_wfh = TRUE;
       RESET_BINDING(curwin);                /* don't take over 'scrollbind'
                                                and 'cursorbind' */
       curwin->w_p_diff = FALSE;             /* no 'diff' */
       curwin->w_p_fdc = 0;                  /* no 'foldcolumn' */
-      return TRUE;
+      return true;
     }
   }
-  return FALSE;
+  return false;
 }
 
 
@@ -4735,7 +4745,7 @@ void ex_help(exarg_T *eap)
         if (wp->w_buffer != NULL && wp->w_buffer->b_help)
           break;
     if (wp != NULL && wp->w_buffer->b_nwindows > 0)
-      win_enter(wp, TRUE);
+      win_enter(wp, true);
     else {
       /*
        * There is no help window yet.
@@ -5151,7 +5161,11 @@ void fix_help_buffer(void)
           /* Find all "doc/ *.txt" files in this directory. */
           add_pathsep(NameBuff);
           STRCAT(NameBuff, "doc/*.??[tx]");
-          if (gen_expand_wildcards(1, &NameBuff, &fcount,
+
+          // Note: We cannot just do `&NameBuff` because it is a statically sized array
+          //       so `NameBuff == &NameBuff` according to C semantics.
+          char_u *buff_list[1] = {(char_u*) NameBuff};
+          if (gen_expand_wildcards(1, buff_list, &fcount,
                   &fnames, EW_FILE|EW_SILENT) == OK
               && fcount > 0) {
             int i1;
@@ -5319,7 +5333,11 @@ void ex_helptags(exarg_T *eap)
   STRCPY(NameBuff, dirname);
   add_pathsep(NameBuff);
   STRCAT(NameBuff, "**");
-  if (gen_expand_wildcards(1, &NameBuff, &filecount, &files,
+
+  // Note: We cannot just do `&NameBuff` because it is a statically sized array
+  //       so `NameBuff == &NameBuff` according to C semantics.
+  char_u *buff_list[1] = {(char_u*) NameBuff};
+  if (gen_expand_wildcards(1, buff_list, &filecount, &files,
           EW_FILE|EW_SILENT) == FAIL
       || filecount == 0) {
     EMSG2("E151: No match: %s", NameBuff);
@@ -5417,7 +5435,11 @@ helptags_one (
   STRCPY(NameBuff, dir);
   STRCAT(NameBuff, "/**/*");
   STRCAT(NameBuff, ext);
-  if (gen_expand_wildcards(1, &NameBuff, &filecount, &files,
+
+  // Note: We cannot just do `&NameBuff` because it is a statically sized array
+  //       so `NameBuff == &NameBuff` according to C semantics.
+  char_u *buff_list[1] = {(char_u*) NameBuff};
+  if (gen_expand_wildcards(1, buff_list, &filecount, &files,
           EW_FILE|EW_SILENT) == FAIL
       || filecount == 0) {
     if (!got_int)
@@ -5656,7 +5678,6 @@ void ex_sign(exarg_T *eap)
     int		idx;
     sign_T	*sp;
     sign_T	*sp_prev;
-    buf_T	*buf;
 
     /* Parse the subcommand. */
     p = skiptowhite(arg);
@@ -5883,10 +5904,11 @@ void ex_sign(exarg_T *eap)
 		if (idx == SIGNCMD_UNPLACE && *arg == NUL)
 		{
 		    /* ":sign unplace {id}": remove placed sign by number */
-		    for (buf = firstbuf; buf != NULL; buf = buf->b_next)
-			if ((lnum = buf_delsign(buf, id)) != 0)
-			    update_debug_sign(buf, lnum);
-		    return;
+         FOR_ALL_BUFFERS(buf) {
+           if ((lnum = buf_delsign(buf, id)) != 0)
+               update_debug_sign(buf, lnum);
+            return;
+         }
 		}
 	    }
 	}
@@ -5895,6 +5917,8 @@ void ex_sign(exarg_T *eap)
 	 * Check for line={lnum} name={name} and file={fname} or buffer={nr}.
 	 * Leave "arg" pointing to {fname}.
 	 */
+
+   buf_T *buf = NULL;
 	for (;;)
 	{
 	    if (STRNCMP(arg, "line=", 5) == 0)

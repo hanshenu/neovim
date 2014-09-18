@@ -10,9 +10,13 @@
  * fileio.c: read from and write to a file
  */
 
+#include <errno.h>
+#include <stdbool.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/fileio.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -45,7 +49,9 @@
 #include "nvim/search.h"
 #include "nvim/sha256.h"
 #include "nvim/strings.h"
+#include "nvim/tempfile.h"
 #include "nvim/term.h"
+#include "nvim/types.h"
 #include "nvim/ui.h"
 #include "nvim/undo.h"
 #include "nvim/window.h"
@@ -424,7 +430,7 @@ readfile (
 #ifdef UNIX
     /*
      * On Unix it is possible to read a directory, so we have to
-     * check for it before the mch_open().
+     * check for it before os_open().
      */
     perm = os_getperm(fname);
     if (perm >= 0 && !S_ISREG(perm)                 /* not a regular file ... */
@@ -466,7 +472,7 @@ readfile (
   if (newfile && !read_stdin && !read_buffer) {
     /* Remember time of file. */
     FileInfo file_info;
-    if (os_get_file_info((char *)fname, &file_info)) {
+    if (os_fileinfo((char *)fname, &file_info)) {
       buf_store_file_info(curbuf, &file_info);
       curbuf->b_mtime_read = curbuf->b_mtime;
 #ifdef UNIX
@@ -503,13 +509,13 @@ readfile (
   if (!read_buffer && !read_stdin) {
     if (!newfile || readonlymode) {
       file_readonly = TRUE;
-    } else if ((fd = mch_open((char *)fname, O_RDWR, 0)) < 0) {
+    } else if ((fd = os_open((char *)fname, O_RDWR, 0)) < 0) {
       // opening in readwrite mode failed => file is readonly
       file_readonly = TRUE;
     }
     if (file_readonly == TRUE) {
       // try to open readonly
-      fd = mch_open((char *)fname, O_RDONLY, 0);
+      fd = os_open((char *)fname, O_RDONLY, 0);
     }
   }
 
@@ -692,9 +698,7 @@ readfile (
     if (!read_stdin && (curbuf != old_curbuf
                         || (using_b_ffname && (old_b_ffname != curbuf->b_ffname))
                         || (using_b_fname && (old_b_fname != curbuf->b_fname))
-                        || (fd =
-                              mch_open((char *)fname, O_RDONLY,
-                                  0)) < 0)) {
+                        || (fd = os_open((char *)fname, O_RDONLY, 0)) < 0)) {
       --no_wait_return;
       msg_scroll = msg_save;
       if (fd < 0)
@@ -2144,7 +2148,7 @@ readfile_charconvert (
   char_u      *tmpname;
   char_u      *errmsg = NULL;
 
-  tmpname = vim_tempname('r');
+  tmpname = vim_tempname();
   if (tmpname == NULL)
     errmsg = (char_u *)_("Can't find temp file for conversion");
   else {
@@ -2153,9 +2157,9 @@ readfile_charconvert (
     if (eval_charconvert(fenc, enc_utf8 ? (char_u *)"utf-8" : p_enc,
             fname, tmpname) == FAIL)
       errmsg = (char_u *)_("Conversion with 'charconvert' failed");
-    if (errmsg == NULL && (*fdp = mch_open((char *)tmpname,
-                               O_RDONLY, 0)) < 0)
+    if (errmsg == NULL && (*fdp = os_open((char *)tmpname, O_RDONLY, 0)) < 0) {
       errmsg = (char_u *)_("can't read output of 'charconvert'");
+    }
   }
 
   if (errmsg != NULL) {
@@ -2170,8 +2174,9 @@ readfile_charconvert (
   }
 
   /* If the input file is closed, open it (caller should check for error). */
-  if (*fdp < 0)
-    *fdp = mch_open((char *)fname, O_RDONLY, 0);
+  if (*fdp < 0) {
+    *fdp = os_open((char *)fname, O_RDONLY, 0);
+  }
 
   return tmpname;
 }
@@ -2578,7 +2583,7 @@ buf_write (
 #if defined(UNIX)
   perm = -1;
   FileInfo file_info_old;
-  if (!os_get_file_info((char *)fname, &file_info_old)) {
+  if (!os_fileinfo((char *)fname, &file_info_old)) {
     newfile = TRUE;
   } else {
     perm = file_info_old.stat.st_mode;
@@ -2624,7 +2629,7 @@ buf_write (
       goto fail;
     }
     if (overwriting) {
-      os_get_file_info((char *)fname, &file_info_old);
+      os_fileinfo((char *)fname, &file_info_old);
     }
 
   }
@@ -2706,16 +2711,10 @@ buf_write (
        * - it's a hard link
        * - it's a symbolic link
        * - we don't have write permission in the directory
-       * - we can't set the owner/group of the new file
        */
-      if (file_info_old.stat.st_nlink > 1
-          || !os_get_file_info_link((char *)fname, &file_info)
-          || !os_file_info_id_equal(&file_info, &file_info_old)
-#  ifndef HAVE_FCHOWN
-          || file_info.stat.st_uid != file_info_old.stat.st_uid
-          || file_info.stat.st_gid != file_info_old.stat.st_gid
-#  endif
-          ) {
+      if (os_fileinfo_hardlinks(&file_info_old) > 1
+          || !os_fileinfo_link((char *)fname, &file_info)
+          || !os_fileinfo_id_equal(&file_info, &file_info_old)) {
         backup_copy = TRUE;
       } else
 # endif
@@ -2729,20 +2728,18 @@ buf_write (
         STRCPY(IObuff, fname);
         for (i = 4913;; i += 123) {
           sprintf((char *)path_tail(IObuff), "%d", i);
-          if (!os_get_file_info_link((char *)IObuff, &file_info)) {
+          if (!os_fileinfo_link((char *)IObuff, &file_info)) {
             break;
           }
         }
-        fd = mch_open((char *)IObuff,
+        fd = os_open((char *)IObuff,
             O_CREAT|O_WRONLY|O_EXCL|O_NOFOLLOW, perm);
         if (fd < 0)             /* can't write in directory */
           backup_copy = TRUE;
         else {
 # ifdef UNIX
-#  ifdef HAVE_FCHOWN
-          fchown(fd, file_info_old.stat.st_uid, file_info_old.stat.st_gid);
-#  endif
-          if (!os_get_file_info((char *)IObuff, &file_info)
+          os_fchown(fd, file_info_old.stat.st_uid, file_info_old.stat.st_gid);
+          if (!os_fileinfo((char *)IObuff, &file_info)
               || file_info.stat.st_uid != file_info_old.stat.st_uid
               || file_info.stat.st_gid != file_info_old.stat.st_gid
               || (long)file_info.stat.st_mode != perm) {
@@ -2762,20 +2759,20 @@ buf_write (
      */
     if ((bkc_flags & BKC_BREAKSYMLINK) || (bkc_flags & BKC_BREAKHARDLINK)) {
 # ifdef UNIX
-      bool file_info_link_ok = os_get_file_info_link((char *)fname, &file_info);
+      bool file_info_link_ok = os_fileinfo_link((char *)fname, &file_info);
 
       /* Symlinks. */
       if ((bkc_flags & BKC_BREAKSYMLINK)
           && file_info_link_ok
-          && !os_file_info_id_equal(&file_info, &file_info_old)) {
+          && !os_fileinfo_id_equal(&file_info, &file_info_old)) {
         backup_copy = FALSE;
       }
 
       /* Hardlinks. */
       if ((bkc_flags & BKC_BREAKHARDLINK)
-          && file_info_old.stat.st_nlink > 1
+          && os_fileinfo_hardlinks(&file_info_old) > 1
           && (!file_info_link_ok
-              || os_file_info_id_equal(&file_info, &file_info_old))) {
+              || os_fileinfo_id_equal(&file_info, &file_info_old))) {
         backup_copy = FALSE;
       }
 # endif
@@ -2787,8 +2784,7 @@ buf_write (
     else
       backup_ext = p_bex;
 
-    if (backup_copy
-        && (fd = mch_open((char *)fname, O_RDONLY, 0)) >= 0) {
+    if (backup_copy && (fd = os_open((char *)fname, O_RDONLY, 0)) >= 0) {
       int bfd;
       char_u      *copybuf, *wp;
       int some_error = FALSE;
@@ -2841,14 +2837,14 @@ buf_write (
           /*
            * Check if backup file already exists.
            */
-          if (os_get_file_info((char *)backup, &file_info_new)) {
+          if (os_fileinfo((char *)backup, &file_info_new)) {
             /*
              * Check if backup file is same as original file.
              * May happen when modname() gave the same file back (e.g. silly
              * link). If we don't check here, we either ruin the file when
              * copying or erase it after writing.
              */
-            if (os_file_info_id_equal(&file_info_new, &file_info_old)) {
+            if (os_fileinfo_id_equal(&file_info_new, &file_info_old)) {
               free(backup);
               backup = NULL;                    /* no backup file to delete */
             }
@@ -2865,7 +2861,7 @@ buf_write (
                 wp = backup;
               *wp = 'z';
               while (*wp > 'a'
-                     && os_get_file_info((char *)backup, &file_info_new)) {
+                     && os_fileinfo((char *)backup, &file_info_new)) {
                 --*wp;
               }
               /* They all exist??? Must be something wrong. */
@@ -2886,7 +2882,7 @@ buf_write (
           os_remove((char *)backup);
           /* Open with O_EXCL to avoid the file being created while
            * we were sleeping (symlink hacker attack?) */
-          bfd = mch_open((char *)backup,
+          bfd = os_open((char *)backup,
               O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,
               perm & 0777);
           if (bfd < 0) {
@@ -2905,10 +2901,7 @@ buf_write (
              * others.
              */
             if (file_info_new.stat.st_gid != file_info_old.stat.st_gid
-# ifdef HAVE_FCHOWN  /* sequent-ptx lacks fchown() */
-                && fchown(bfd, (uid_t)-1, file_info_old.stat.st_gid) != 0
-# endif
-                ) {
+                && os_fchown(bfd, -1, file_info_old.stat.st_gid) != 0) {
               os_setperm(backup, (perm & 0707) | ((perm & 07) << 3));
             }
 # ifdef HAVE_SELINUX
@@ -3161,7 +3154,7 @@ nobackup:
      * overwrite the original file.
      */
     if (*p_ccv != NUL) {
-      wfname = vim_tempname('w');
+      wfname = vim_tempname();
       if (wfname == NULL) {             /* Can't write without a tempfile! */
         errmsg = (char_u *)_("E214: Can't find temp file for writing");
         goto restore_backup;
@@ -3190,7 +3183,7 @@ nobackup:
    * (this may happen when the user reached his quotum for number of files).
    * Appending will fail if the file does not exist and forceit is FALSE.
    */
-  while ((fd = mch_open((char *)wfname, O_WRONLY | (append
+  while ((fd = os_open((char *)wfname, O_WRONLY | (append
                                                               ? (forceit ? (
                                                                    O_APPEND |
                                                                    O_CREAT) :
@@ -3208,9 +3201,9 @@ nobackup:
       FileInfo file_info;
 
       /* Don't delete the file when it's a hard or symbolic link. */
-      if ((!newfile && file_info_old.stat.st_nlink > 1)
-          || (os_get_file_info_link((char *)fname, &file_info)
-              && !os_file_info_id_equal(&file_info, &file_info_old))) {
+      if ((!newfile && os_fileinfo_hardlinks(&file_info) > 1)
+          || (os_fileinfo_link((char *)fname, &file_info)
+              && !os_fileinfo_id_equal(&file_info, &file_info_old))) {
         errmsg = (char_u *)_("E166: Can't open linked file for writing");
       } else
 #endif
@@ -3420,19 +3413,16 @@ restore_backup:
   /* When creating a new file, set its owner/group to that of the original
    * file.  Get the new device and inode number. */
   if (backup != NULL && !backup_copy) {
-# ifdef HAVE_FCHOWN
-
     /* don't change the owner when it's already OK, some systems remove
      * permission or ACL stuff */
     FileInfo file_info;
-    if (!os_get_file_info((char *)wfname, &file_info)
+    if (!os_fileinfo((char *)wfname, &file_info)
         || file_info.stat.st_uid != file_info_old.stat.st_uid
         || file_info.stat.st_gid != file_info_old.stat.st_gid) {
-      fchown(fd, file_info_old.stat.st_uid, file_info_old.stat.st_gid);
+      os_fchown(fd, file_info_old.stat.st_uid, file_info_old.stat.st_gid);
       if (perm >= 0)            /* set permission again, may have changed */
         (void)os_setperm(wfname, perm);
     }
-# endif
     buf_set_file_id(buf);
   } else if (!buf->file_id_valid) {
     // Set the file_id when creating a new file.
@@ -3511,8 +3501,8 @@ restore_backup:
           MSG(_(e_interr));
           out_flush();
         }
-        if ((fd = mch_open((char *)backup, O_RDONLY, 0)) >= 0) {
-          if ((write_info.bw_fd = mch_open((char *)fname,
+        if ((fd = os_open((char *)backup, O_RDONLY, 0)) >= 0) {
+          if ((write_info.bw_fd = os_open((char *)fname,
                    O_WRONLY | O_CREAT | O_TRUNC,
                    perm & 0777)) >= 0) {
             /* copy the file. */
@@ -3642,7 +3632,7 @@ restore_backup:
       int empty_fd;
 
       if (org == NULL
-          || (empty_fd = mch_open(org,
+          || (empty_fd = os_open(org,
                   O_CREAT | O_EXCL | O_NOFOLLOW,
                   perm < 0 ? 0666 : (perm & 0777))) < 0)
         EMSG(_("E206: patchmode: can't touch empty original file"));
@@ -3723,7 +3713,7 @@ nofail:
 
       /* Update the timestamp to avoid an "overwrite changed file"
        * prompt when writing again. */
-      if (os_get_file_info((char *)fname, &file_info_old)) {
+      if (os_fileinfo((char *)fname, &file_info_old)) {
         buf_store_file_info(buf, &file_info_old);
         buf->b_mtime_read = buf->b_mtime;
       }
@@ -4355,11 +4345,10 @@ static int make_bom(char_u *buf, char_u *name)
 void shorten_fnames(int force)
 {
   char_u dirname[MAXPATHL];
-  buf_T       *buf;
   char_u      *p;
 
   os_dirname(dirname, MAXPATHL);
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+  FOR_ALL_BUFFERS(buf) {
     if (buf->b_fname != NULL
         && !bt_nofile(buf)
         && !path_with_url(buf->b_fname)
@@ -4547,7 +4536,7 @@ int vim_rename(char_u *from, char_u *to)
 
   // Fail if the "from" file doesn't exist. Avoids that "to" is deleted.
   FileInfo from_info;
-  if (!os_get_file_info((char *)from, &from_info)) {
+  if (!os_fileinfo((char *)from, &from_info)) {
     return -1;
   }
 
@@ -4555,8 +4544,8 @@ int vim_rename(char_u *from, char_u *to)
   // This happens when "from" and "to" differ in case and are on a FAT32
   // filesystem. In that case go through a temp file name.
   FileInfo to_info;
-  if (os_get_file_info((char *)to, &to_info)
-      && os_file_info_id_equal(&from_info,  &to_info)) {
+  if (os_fileinfo((char *)to, &to_info)
+      && os_fileinfo_id_equal(&from_info,  &to_info)) {
     use_tmp_file = true;
   }
 
@@ -4611,8 +4600,8 @@ int vim_rename(char_u *from, char_u *to)
   /* For systems that support ACL: get the ACL from the original file. */
   acl = mch_get_acl(from);
 #endif
-  fd_in = mch_open((char *)from, O_RDONLY, 0);
-  if (fd_in == -1) {
+  fd_in = os_open((char *)from, O_RDONLY, 0);
+  if (fd_in < 0) {
 #ifdef HAVE_ACL
     mch_free_acl(acl);
 #endif
@@ -4620,9 +4609,9 @@ int vim_rename(char_u *from, char_u *to)
   }
 
   /* Create the new file with same permissions as the original. */
-  fd_out = mch_open((char *)to,
+  fd_out = os_open((char *)to,
       O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW, (int)perm);
-  if (fd_out == -1) {
+  if (fd_out < 0) {
     close(fd_in);
 #ifdef HAVE_ACL
     mch_free_acl(acl);
@@ -4656,7 +4645,7 @@ int vim_rename(char_u *from, char_u *to)
     errmsg = _("E210: Error reading \"%s\"");
     to = from;
   }
-#ifndef UNIX        /* for Unix mch_open() already set the permission */
+#ifndef UNIX        /* for Unix os_open() already set the permission */
   os_setperm(to, perm);
 #endif
 #ifdef HAVE_ACL
@@ -4801,7 +4790,7 @@ buf_check_timestamp (
   int helpmesg = FALSE;
   int reload = FALSE;
   int can_reload = FALSE;
-  off_t orig_size = buf->b_orig_size;
+  uint64_t orig_size = buf->b_orig_size;
   int orig_mode = buf->b_orig_mode;
   static int busy = FALSE;
   int n;
@@ -4823,7 +4812,7 @@ buf_check_timestamp (
   bool file_info_ok;
   if (!(buf->b_flags & BF_NOTEDITED)
       && buf->b_mtime != 0
-      && (!(file_info_ok = os_get_file_info((char *)buf->b_ffname, &file_info))
+      && (!(file_info_ok = os_fileinfo((char *)buf->b_ffname, &file_info))
           || time_differs((long)file_info.stat.st_mtim.tv_sec, buf->b_mtime)
           || (int)file_info.stat.st_mode != buf->b_orig_mode
           )) {
@@ -4966,7 +4955,7 @@ buf_check_timestamp (
           if (emsg_silent == 0) {
             out_flush();
             /* give the user some time to think about it */
-            ui_delay(1000L, TRUE);
+            ui_delay(1000L, true);
 
             /* don't redraw and erase the message */
             redraw_cmdline = FALSE;
@@ -5138,9 +5127,10 @@ void buf_reload(buf_T *buf, int orig_mode)
 }
 
 void buf_store_file_info(buf_T *buf, FileInfo *file_info)
+  FUNC_ATTR_NONNULL_ALL
 {
   buf->b_mtime = (long)file_info->stat.st_mtim.tv_sec;
-  buf->b_orig_size = file_info->stat.st_size;
+  buf->b_orig_size = os_fileinfo_size(file_info);
   buf->b_orig_mode = (int)file_info->stat.st_mode;
 }
 
@@ -5152,191 +5142,6 @@ void write_lnum_adjust(linenr_T offset)
 {
   if (curbuf->b_no_eol_lnum != 0)       /* only if there is a missing eol */
     curbuf->b_no_eol_lnum += offset;
-}
-
-#if defined(TEMPDIRNAMES) || defined(PROTO)
-static long temp_count = 0;             /* Temp filename counter. */
-
-/*
- * Delete the temp directory and all files it contains.
- */
-void vim_deltempdir(void)
-{
-  char_u      **files;
-  int file_count;
-  int i;
-
-  if (vim_tempdir != NULL) {
-    sprintf((char *)NameBuff, "%s*", vim_tempdir);
-    if (gen_expand_wildcards(1, &NameBuff, &file_count, &files,
-            EW_DIR|EW_FILE|EW_SILENT) == OK) {
-      for (i = 0; i < file_count; ++i)
-        os_remove((char *)files[i]);
-      FreeWild(file_count, files);
-    }
-    path_tail(NameBuff)[-1] = NUL;
-    os_rmdir((char *)NameBuff);
-
-    free(vim_tempdir);
-    vim_tempdir = NULL;
-  }
-}
-
-#endif
-
-#ifdef TEMPDIRNAMES
-/*
- * Directory "tempdir" was created.  Expand this name to a full path and put
- * it in "vim_tempdir".  This avoids that using ":cd" would confuse us.
- * "tempdir" must be no longer than MAXPATHL.
- */
-static void vim_settempdir(char_u *tempdir)
-{
-  char_u *buf = verbose_try_malloc((size_t)MAXPATHL + 2);
-  if (buf) {
-    if (vim_FullName(tempdir, buf, MAXPATHL, FALSE) == FAIL)
-      STRCPY(buf, tempdir);
-    add_pathsep(buf);
-    vim_tempdir = vim_strsave(buf);
-    free(buf);
-  }
-}
-#endif
-
-/*
- * vim_tempname(): Return a unique name that can be used for a temp file.
- *
- * The temp file is NOT created.
- *
- * The returned pointer is to allocated memory.
- * The returned pointer is NULL if no valid name was found.
- */
-char_u *
-vim_tempname (
-    int extra_char          /* char to use in the name instead of '?' */
-)
-{
-#ifdef USE_TMPNAM
-  char_u itmp[L_tmpnam];        /* use tmpnam() */
-#else
-  char_u itmp[TEMPNAMELEN];
-#endif
-
-#ifdef TEMPDIRNAMES
-  static char *(tempdirs[]) = {TEMPDIRNAMES};
-  int i;
-
-  /*
-   * This will create a directory for private use by this instance of Vim.
-   * This is done once, and the same directory is used for all temp files.
-   * This method avoids security problems because of symlink attacks et al.
-   * It's also a bit faster, because we only need to check for an existing
-   * file when creating the directory and not for each temp file.
-   */
-  if (vim_tempdir == NULL) {
-    /*
-     * Try the entries in TEMPDIRNAMES to create the temp directory.
-     */
-    for (i = 0; i < (int)(sizeof(tempdirs) / sizeof(char *)); ++i) {
-# ifndef HAVE_MKDTEMP
-      size_t itmplen;
-      long nr;
-      long off;
-# endif
-
-      /* expand $TMP, leave room for "/v1100000/999999999" */
-      expand_env((char_u *)tempdirs[i], itmp, TEMPNAMELEN - 20);
-      if (os_isdir(itmp)) {                    /* directory exists */
-        add_pathsep(itmp);
-
-# ifdef HAVE_MKDTEMP
-        /* Leave room for filename */
-        STRCAT(itmp, "vXXXXXX");
-        if (mkdtemp((char *)itmp) != NULL)
-          vim_settempdir(itmp);
-# else
-        /* Get an arbitrary number of up to 6 digits.  When it's
-         * unlikely that it already exists it will be faster,
-         * otherwise it doesn't matter.  The use of mkdir() avoids any
-         * security problems because of the predictable number. */
-        nr = (os_get_pid() + (long)time(NULL)) % 1000000L;
-        itmplen = STRLEN(itmp);
-
-        /* Try up to 10000 different values until we find a name that
-         * doesn't exist. */
-        for (off = 0; off < 10000L; ++off) {
-          int r;
-#  if defined(UNIX)
-          mode_t umask_save;
-#  endif
-
-          sprintf((char *)itmp + itmplen, "v%" PRId64, (int64_t)(nr + off));
-#  ifndef EEXIST
-          /* If mkdir() does not set errno to EEXIST, check for
-           * existing file here.  There is a race condition then,
-           * although it's fail-safe. */
-          if (os_file_exists(itmp))
-            continue;
-#  endif
-#  if defined(UNIX)
-          /* Make sure the umask doesn't remove the executable bit.
-           * "repl" has been reported to use "177". */
-          umask_save = umask(077);
-#  endif
-          r = os_mkdir((char *)itmp, 0700);
-#  if defined(UNIX)
-          (void)umask(umask_save);
-#  endif
-          if (r == 0) {
-            vim_settempdir(itmp);
-            break;
-          }
-#  ifdef EEXIST
-          /* If the mkdir() didn't fail because the file/dir exists,
-           * we probably can't create any dir here, try another
-           * place. */
-          if (errno != EEXIST)
-#  endif
-          break;
-        }
-# endif /* HAVE_MKDTEMP */
-        if (vim_tempdir != NULL)
-          break;
-      }
-    }
-  }
-
-  if (vim_tempdir != NULL) {
-    /* There is no need to check if the file exists, because we own the
-     * directory and nobody else creates a file in it. */
-    sprintf((char *)itmp, "%s%" PRId64, vim_tempdir, (int64_t)temp_count++);
-    return vim_strsave(itmp);
-  }
-
-  return NULL;
-
-#else /* TEMPDIRNAMES */
-
-
-#  ifdef USE_TMPNAM
-  char_u      *p;
-
-  /* tmpnam() will make its own name */
-  p = tmpnam((char *)itmp);
-  if (p == NULL || *p == NUL)
-    return NULL;
-#  else
-  char_u      *p;
-
-  STRCPY(itmp, TEMPNAME);
-  if ((p = vim_strchr(itmp, '?')) != NULL)
-    *p = extra_char;
-  if (mktemp((char *)itmp) == NULL)
-    return NULL;
-#  endif
-
-  return vim_strsave(itmp);
-#endif /* TEMPDIRNAMES */
 }
 
 #if defined(BACKSLASH_IN_FILENAME) || defined(PROTO)
@@ -6304,7 +6109,6 @@ void ex_doautoall(exarg_T *eap)
 {
   int retval;
   aco_save_T aco;
-  buf_T       *buf;
   char_u      *arg = eap->arg;
   int call_do_modelines = check_nomodeline(&arg);
 
@@ -6315,7 +6119,7 @@ void ex_doautoall(exarg_T *eap)
    * gives problems when the autocommands make changes to the list of
    * buffers or windows...
    */
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+  FOR_ALL_BUFFERS(buf) {
     if (buf->b_ml.ml_mfp != NULL) {
       /* find a window for this buffer and save some values */
       aucmd_prepbuf(&aco, buf);
@@ -6373,12 +6177,17 @@ aucmd_prepbuf (
   int save_acd;
 
   /* Find a window that is for the new buffer */
-  if (buf == curbuf)            /* be quick when buf is curbuf */
+  if (buf == curbuf) {          /* be quick when buf is curbuf */
     win = curwin;
-  else
-    for (win = firstwin; win != NULL; win = win->w_next)
-      if (win->w_buffer == buf)
+  } else {
+    win = NULL;
+    FOR_ALL_WINDOWS(wp) {
+      if (wp->w_buffer == buf) {
+        win = wp;
         break;
+      }
+    }
+  }
 
   /* Allocate "aucmd_win" when needed.  If this fails (out of memory) fall
    * back to using the current window. */
@@ -7366,45 +7175,8 @@ match_file_pat (
 {
   regmatch_T regmatch;
   int result = FALSE;
-#ifdef FEAT_OSFILETYPE
-  int no_pattern = FALSE;           /* TRUE if check is filetype only */
-  char_u      *type_start;
-  char_u c;
-  int match = FALSE;
-#endif
 
   regmatch.rm_ic = p_fic;   /* ignore case if 'fileignorecase' is set */
-#ifdef FEAT_OSFILETYPE
-  if (*pattern == '<') {
-    /* There is a filetype condition specified with this pattern.
-     * Check the filetype matches first. If not, don't bother with the
-     * pattern (set regprog to NULL).
-     * Always use magic for the regexp.
-     */
-
-    for (type_start = pattern + 1; (c = *pattern); pattern++) {
-      if ((c == ';' || c == '>') && match == FALSE) {
-        *pattern = NUL;             /* Terminate the string */
-        /* TODO: match with 'filetype' of buffer that "fname" comes
-         * from. */
-        match = mch_check_filetype(fname, type_start);
-        *pattern = c;               /* Restore the terminator */
-        type_start = pattern + 1;
-      }
-      if (c == '>')
-        break;
-    }
-
-    /* (c should never be NUL, but check anyway) */
-    if (match == FALSE || c == NUL)
-      regmatch.regprog = NULL;          /* Doesn't match - don't check pat. */
-    else if (*pattern == NUL) {
-      regmatch.regprog = NULL;          /* Vim will try to free regprog later */
-      no_pattern = TRUE;        /* Always matches - don't check pat. */
-    } else
-      regmatch.regprog = vim_regcomp(pattern + 1, RE_MAGIC);
-  } else
-#endif
   {
     if (prog != NULL)
       regmatch.regprog = prog;
@@ -7419,12 +7191,6 @@ match_file_pat (
    * 3. the tail of the file name, when the pattern has no '/'.
    */
   if (
-#ifdef FEAT_OSFILETYPE
-    /* If the check is for a filetype only and we don't care
-     * about the path then skip all the regexp stuff.
-     */
-    no_pattern ||
-#endif
     (regmatch.regprog != NULL
      && ((allow_dirs
           && (vim_regexec(&regmatch, fname, (colnr_T)0)
@@ -7477,9 +7243,6 @@ int match_file_list(char_u *list, char_u *sfname, char_u *ffname)
  * allow_dirs, otherwise FALSE is put there -- webb.
  * Handle backslashes before special characters, like "\*" and "\ ".
  *
- * If FEAT_OSFILETYPE defined then pass initial <type> through unchanged. Eg:
- * '<html>myfile' becomes '<html>^myfile$' -- leonard.
- *
  * Returns NULL on failure.
  */
 char_u *
@@ -7497,38 +7260,13 @@ file_pat_to_reg_pat (
   int i;
   int nested = 0;
   int add_dollar = TRUE;
-#ifdef FEAT_OSFILETYPE
-  int check_length = 0;
-#endif
 
   if (allow_dirs != NULL)
     *allow_dirs = FALSE;
   if (pat_end == NULL)
     pat_end = pat + STRLEN(pat);
 
-#ifdef FEAT_OSFILETYPE
-  /* Find out how much of the string is the filetype check */
-  if (*pat == '<') {
-    /* Count chars until the next '>' */
-    for (p = pat + 1; p < pat_end && *p != '>'; p++)
-      ;
-    if (p < pat_end) {
-      /* Pattern is of the form <.*>.*  */
-      check_length = p - pat + 1;
-      if (p + 1 >= pat_end) {
-        /* The 'pattern' is a filetype check ONLY */
-        reg_pat = xmemdupz(pat, (size_t)check_length);
-        return reg_pat;
-      }
-    }
-    /* else: there was no closing '>' - assume it was a normal pattern */
-
-  }
-  pat += check_length;
-  size = 2 + (size_t)check_length;
-#else
   size = 2;             /* '^' at start, '$' at end */
-#endif
 
   for (p = pat; p < pat_end; p++) {
     switch (*p) {
@@ -7557,14 +7295,7 @@ file_pat_to_reg_pat (
   }
   reg_pat = xmalloc(size + 1);
 
-#ifdef FEAT_OSFILETYPE
-  /* Copy the type check in to the start. */
-  if (check_length)
-    memmove(reg_pat, pat - check_length, (size_t)check_length);
-  i = check_length;
-#else
   i = 0;
-#endif
 
   if (pat[0] == '*')
     while (pat[0] == '*' && pat < pat_end - 1)

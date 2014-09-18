@@ -1,9 +1,11 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <inttypes.h>
 
 #include <msgpack.h>
 
 #include "nvim/vim.h"
+#include "nvim/log.h"
 #include "nvim/memory.h"
 #include "nvim/os/wstream.h"
 #include "nvim/os/msgpack_rpc.h"
@@ -14,9 +16,6 @@
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "os/msgpack_rpc.c.generated.h"
 #endif
-
-extern const uint8_t msgpack_metadata[];
-extern const unsigned int msgpack_metadata_size;
 
 /// Validates the basic structure of the msgpack-rpc call and fills `res`
 /// with the basic response structure.
@@ -37,60 +36,23 @@ WBuffer *msgpack_rpc_call(uint64_t channel_id,
     return serialize_response(response_id, err, NIL, sbuffer);
   }
 
-  uint64_t method_id = req->via.array.ptr[2].via.u64;
-
-  if (method_id == 0) {
-    return serialize_metadata(response_id, channel_id, sbuffer);
-  }
-
   // dispatch the call
   Error error = { .set = false };
-  Object rv = msgpack_rpc_dispatch(channel_id, method_id, req, &error);
+  Object rv = msgpack_rpc_dispatch(channel_id, req, &error);
   // send the response
   msgpack_packer response;
   msgpack_packer_init(&response, sbuffer, msgpack_sbuffer_write);
 
   if (error.set) {
+    ELOG("Error dispatching msgpack-rpc call: %s(request: id %" PRIu64 ")",
+         error.msg,
+         response_id);
     return serialize_response(response_id, error.msg, NIL, sbuffer);
   }
 
+  DLOG("Successfully completed mspgack-rpc call(request id: %" PRIu64 ")",
+       response_id);
   return serialize_response(response_id, NULL, rv, sbuffer);
-}
-
-/// Try to unpack a msgpack document from the data in the unpacker buffer. This
-/// function is a replacement to msgpack.h `msgpack_unpack_next` that lets
-/// the called know if the unpacking failed due to bad input or due to missing
-/// data.
-///
-/// @param unpacker The unpacker containing the parse buffer
-/// @param result The result which will contain the parsed object
-/// @return kUnpackResultOk      : An object was parsed
-///         kUnpackResultFail    : Got bad input
-///         kUnpackResultNeedMore: Need more data
-UnpackResult msgpack_rpc_unpack(msgpack_unpacker* unpacker,
-                                msgpack_unpacked* result)
-  FUNC_ATTR_NONNULL_ALL
-{
-  if (result->zone != NULL) {
-    msgpack_zone_free(result->zone);
-  }
-
-  int res = msgpack_unpacker_execute(unpacker);
-
-  if (res > 0) {
-    result->zone = msgpack_unpacker_release_zone(unpacker);
-    result->data = msgpack_unpacker_data(unpacker);
-    msgpack_unpacker_reset(unpacker);
-    return kUnpackResultOk;
-  }
-
-  if (res < 0) {
-    // Since we couldn't parse it, destroy the data consumed so far
-    msgpack_unpacker_reset(unpacker);
-    return kUnpackResultFail;
-  }
-
-  return kUnpackResultNeedMore;
 }
 
 /// Finishes the msgpack-rpc call with an error message.
@@ -103,17 +65,28 @@ void msgpack_rpc_error(char *msg, msgpack_packer *res)
   size_t len = strlen(msg);
 
   // error message
-  msgpack_pack_raw(res, len);
-  msgpack_pack_raw_body(res, msg, len);
+  msgpack_pack_bin(res, len);
+  msgpack_pack_bin_body(res, msg, len);
   // Nil result
   msgpack_pack_nil(res);
+}
+
+/// Handler executed when an invalid method name is passed
+Object msgpack_rpc_handle_missing_method(uint64_t channel_id,
+                                         msgpack_object *req,
+                                         Error *error)
+{
+  snprintf(error->msg, sizeof(error->msg), "Invalid method name");
+  error->set = true;
+  return NIL;
 }
 
 /// Serializes a msgpack-rpc request or notification(id == 0)
 WBuffer *serialize_request(uint64_t request_id,
                            String method,
-                           Object arg,
-                           msgpack_sbuffer *sbuffer)
+                           Array args,
+                           msgpack_sbuffer *sbuffer,
+                           size_t refcount)
   FUNC_ATTR_NONNULL_ARG(4)
 {
   msgpack_packer pac;
@@ -125,13 +98,14 @@ WBuffer *serialize_request(uint64_t request_id,
     msgpack_pack_uint64(&pac, request_id);
   }
 
-  msgpack_pack_raw(&pac, method.size);
-  msgpack_pack_raw_body(&pac, method.data, method.size);
-  msgpack_rpc_from_object(arg, &pac);
+  msgpack_pack_bin(&pac, method.size);
+  msgpack_pack_bin_body(&pac, method.data, method.size);
+  msgpack_rpc_from_array(args, &pac);
   WBuffer *rv = wstream_new_buffer(xmemdup(sbuffer->data, sbuffer->size),
                                    sbuffer->size,
+                                   refcount,
                                    free);
-  msgpack_rpc_free_object(arg);
+  api_free_array(args);
   msgpack_sbuffer_clear(sbuffer);
   return rv;
 }
@@ -152,8 +126,8 @@ WBuffer *serialize_response(uint64_t response_id,
   if (err_msg) {
     String err = {.size = strlen(err_msg), .data = err_msg};
     // error message
-    msgpack_pack_raw(&pac, err.size);
-    msgpack_pack_raw_body(&pac, err.data, err.size);
+    msgpack_pack_bin(&pac, err.size);
+    msgpack_pack_bin_body(&pac, err.data, err.size);
     // Nil result
     msgpack_pack_nil(&pac);
   } else {
@@ -165,32 +139,9 @@ WBuffer *serialize_response(uint64_t response_id,
 
   WBuffer *rv = wstream_new_buffer(xmemdup(sbuffer->data, sbuffer->size),
                                    sbuffer->size,
+                                   1,  // responses only go though 1 channel
                                    free);
-  msgpack_rpc_free_object(arg);
-  msgpack_sbuffer_clear(sbuffer);
-  return rv;
-}
-
-WBuffer *serialize_metadata(uint64_t id,
-                            uint64_t channel_id,
-                            msgpack_sbuffer *sbuffer)
-  FUNC_ATTR_NONNULL_ALL
-{
-  msgpack_packer pac;
-  msgpack_packer_init(&pac, sbuffer, msgpack_sbuffer_write);
-  msgpack_pack_array(&pac, 4);
-  msgpack_pack_int(&pac, 1);
-  msgpack_pack_uint64(&pac, id);
-  // Nil error
-  msgpack_pack_nil(&pac);
-  // The result is the [channel_id, metadata] array
-  msgpack_pack_array(&pac, 2);
-  msgpack_pack_uint64(&pac, channel_id);
-  msgpack_pack_raw(&pac, msgpack_metadata_size);
-  msgpack_pack_raw_body(&pac, msgpack_metadata, msgpack_metadata_size);
-  WBuffer *rv = wstream_new_buffer(xmemdup(sbuffer->data, sbuffer->size),
-                                   sbuffer->size,
-                                   free);
+  api_free_object(arg);
   msgpack_sbuffer_clear(sbuffer);
   return rv;
 }
@@ -224,8 +175,9 @@ static char *msgpack_rpc_validate(uint64_t *response_id, msgpack_object *req)
     return "Message type must be 0";
   }
 
-  if (req->via.array.ptr[2].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-    return "Method id must be a positive integer";
+  if (req->via.array.ptr[2].type != MSGPACK_OBJECT_BIN
+    && req->via.array.ptr[2].type != MSGPACK_OBJECT_STR) {
+    return "Method must be a string";
   }
 
   if (req->via.array.ptr[3].type != MSGPACK_OBJECT_ARRAY) {

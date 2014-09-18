@@ -7,9 +7,14 @@
  */
 
 #define EXTERN
+#include <errno.h>
+#include <inttypes.h>
 #include <string.h>
 #include <stdbool.h>
 
+#include <msgpack.h>
+
+#include "nvim/ascii.h"
 #include "nvim/vim.h"
 #include "nvim/main.h"
 #include "nvim/buffer.h"
@@ -24,6 +29,9 @@
 #include "nvim/getchar.h"
 #include "nvim/hashtab.h"
 #include "nvim/if_cscope.h"
+#ifdef HAVE_LOCALE_H
+# include <locale.h>
+#endif
 #include "nvim/mark.h"
 #include "nvim/mbyte.h"
 #include "nvim/memline.h"
@@ -39,6 +47,7 @@
 #include "nvim/option.h"
 #include "nvim/os_unix.h"
 #include "nvim/path.h"
+#include "nvim/profile.h"
 #include "nvim/quickfix.h"
 #include "nvim/screen.h"
 #include "nvim/strings.h"
@@ -50,6 +59,9 @@
 #include "nvim/os/input.h"
 #include "nvim/os/os.h"
 #include "nvim/os/signal.h"
+#include "nvim/os/msgpack_rpc_helpers.h"
+#include "nvim/api/private/defs.h"
+#include "nvim/api/private/helpers.h"
 
 /* Maximum number of commands from + or -c arguments. */
 #define MAX_ARG_CMDS 10
@@ -109,9 +121,6 @@ static void init_locale(void);
 # endif
 #endif /* NO_VIM_MAIN */
 
-extern const uint8_t msgpack_metadata[];
-extern const unsigned int msgpack_metadata_size;
-
 /*
  * Different types of error messages.
  */
@@ -137,10 +146,6 @@ int main(int argc, char **argv)
   char_u      *fname = NULL;            /* file name from command line */
   mparm_T params;                       /* various parameters passed between
                                          * main() and other functions. */
-  /*
-   * Do any system-specific initialisations.  These can NOT use IObuff or
-   * NameBuff.  Thus emsg2() cannot be called!
-   */
   mch_early_init();
 
   /* Many variables are in "params" so that we can pass them to invoked
@@ -159,12 +164,6 @@ int main(int argc, char **argv)
 
   /* Init the table of Normal mode commands. */
   init_normal_cmds();
-
-  /*
-   * Allocate space for the generic buffers (needed for set_init_1() and
-   * EMSG2()).
-   */
-  allocate_generic_buffers();
 
 #if defined(HAVE_LOCALE_H) || defined(X_LOCALE)
   /*
@@ -193,6 +192,7 @@ int main(int argc, char **argv)
   init_yank();                  /* init yank buffers */
 
   alist_init(&global_alist);    /* Init the argument list to empty. */
+  global_alist.id = 0;
 
   /*
    * Set the default values for the options.
@@ -259,10 +259,10 @@ int main(int argc, char **argv)
   TIME_MSG("shell init");
 
 
-  /*
-   * Print a warning if stdout is not a terminal.
-   */
-  check_tty(&params);
+  if (!embedded_mode) {
+    // Print a warning if stdout is not a terminal.
+    check_tty(&params);
+  }
 
   /* This message comes before term inits, but after setting "silent_mode"
    * when the input is not a tty. */
@@ -270,8 +270,16 @@ int main(int argc, char **argv)
     printf(_("%d files to edit\n"), GARGCOUNT);
 
   if (params.want_full_screen && !silent_mode) {
-    termcapinit(params.term);           /* set terminal name and get terminal
-                                           capabilities (will set full_screen) */
+    if (embedded_mode) {
+      // In embedded mode don't do terminal-related initializations, assume an
+      // initial screen size of 80x20
+      full_screen = true;
+      set_shellsize(80, 20, false);
+    } else { 
+      // set terminal name and get terminal capabilities (will set full_screen)
+      // Do some initialization of the screen
+      termcapinit(params.term);
+    }
     screen_start();             /* don't know where cursor is now */
     TIME_MSG("Termcap init");
   }
@@ -288,7 +296,7 @@ int main(int argc, char **argv)
 
   cmdline_row = Rows - p_ch;
   msg_row = cmdline_row;
-  screenalloc(FALSE);           /* allocate screen buffers */
+  screenalloc(false);           /* allocate screen buffers */
   set_init_2();
   TIME_MSG("inits 2");
 
@@ -408,14 +416,18 @@ int main(int argc, char **argv)
     TIME_MSG("waiting for return");
   }
 
-  starttermcap();             /* start termcap if not done by wait_return() */
-  TIME_MSG("start termcap");
-  may_req_ambiguous_char_width();
+  if (!embedded_mode) {
+    starttermcap(); // start termcap if not done by wait_return()
+    TIME_MSG("start termcap");
+    may_req_ambiguous_char_width();
+    setmouse();  // may start using the mouse
 
-  setmouse();                             /* may start using the mouse */
-  if (scroll_region)
-    scroll_region_reset();                /* In case Rows changed */
-  scroll_start();         /* may scroll the screen to the right position */
+    if (scroll_region) {
+      scroll_region_reset(); // In case Rows changed
+    }
+
+    scroll_start(); // may scroll the screen to the right position
+  }
 
   /*
    * Don't clear the screen when starting in Ex mode, unless using the GUI.
@@ -462,11 +474,10 @@ int main(int argc, char **argv)
   edit_buffers(&params);
 
   if (params.diff_mode) {
-    win_T   *wp;
-
     /* set options in each window for "vimdiff". */
-    for (wp = firstwin; wp != NULL; wp = wp->w_next)
+    FOR_ALL_WINDOWS(wp) {
       diff_win_options(wp, TRUE);
+    }
   }
 
   /*
@@ -704,16 +715,14 @@ main_loop (
 
       do_redraw = FALSE;
 
-#ifdef STARTUPTIME
       /* Now that we have drawn the first screen all the startup stuff
        * has been done, close any file for startup messages. */
       if (time_fd != NULL) {
         TIME_MSG("first screen update");
-        TIME_MSG("--- VIM STARTED ---");
+        TIME_MSG("--- NVIM STARTED ---");
         fclose(time_fd);
         time_fd = NULL;
       }
-#endif
     }
 
     /*
@@ -749,7 +758,6 @@ main_loop (
 /* Exit properly */
 void getout(int exitval)
 {
-  buf_T       *buf;
   win_T       *wp;
   tabpage_T   *tp, *next_tp;
 
@@ -777,7 +785,7 @@ void getout(int exitval)
         if (wp->w_buffer == NULL)
           /* Autocmd must have close the buffer already, skip. */
           continue;
-        buf = wp->w_buffer;
+        buf_T *buf = wp->w_buffer;
         if (buf->b_changedtick != -1) {
           apply_autocmds(EVENT_BUFWINLEAVE, buf->b_fname,
               buf->b_fname, FALSE, buf);
@@ -790,13 +798,14 @@ void getout(int exitval)
     }
 
     /* Trigger BufUnload for buffers that are loaded */
-    for (buf = firstbuf; buf != NULL; buf = buf->b_next)
+    FOR_ALL_BUFFERS(buf) {
       if (buf->b_ml.ml_mfp != NULL) {
         apply_autocmds(EVENT_BUFUNLOAD, buf->b_fname, buf->b_fname,
             FALSE, buf);
         if (!buf_valid(buf))            /* autocmd may delete the buffer */
           break;
       }
+    }
     apply_autocmds(EVENT_VIMLEAVEPRE, NULL, NULL, FALSE, curbuf);
   }
 
@@ -1020,11 +1029,19 @@ static void command_line_scan(mparm_T *parmp)
             msg_putchar('\n');
             msg_didout = FALSE;
             mch_exit(0);
-	  } else if (STRICMP(argv[0] + argv_idx, "api-msgpack-metadata") == 0) {
-            for (unsigned int i = 0; i<msgpack_metadata_size; i++) {
-              putchar(msgpack_metadata[i]);
+          } else if (STRICMP(argv[0] + argv_idx, "api-info") == 0) {
+            msgpack_sbuffer* b = msgpack_sbuffer_new();
+            msgpack_packer* p = msgpack_packer_new(b, msgpack_sbuffer_write);
+            Object md = DICTIONARY_OBJ(api_metadata());
+            msgpack_rpc_from_object(md, p);
+
+            for (size_t i = 0; i < b->size; i++) {
+              putchar(b->data[i]);
             }
+
             mch_exit(0);
+          } else if (STRICMP(argv[0] + argv_idx, "embed") == 0) {
+            embedded_mode = true;
           } else if (STRNICMP(argv[0] + argv_idx, "literal", 7) == 0) {
 #if !defined(UNIX)
             parmp->literal = TRUE;
@@ -1460,27 +1477,15 @@ static void init_params(mparm_T *paramp, int argc, char **argv)
  */
 static void init_startuptime(mparm_T *paramp)
 {
-#ifdef STARTUPTIME
-  int i;
-  for (i = 1; i < paramp->argc; ++i) {
+  for (int i = 1; i < paramp->argc; i++) {
     if (STRICMP(paramp->argv[i], "--startuptime") == 0 && i + 1 < paramp->argc) {
       time_fd = mch_fopen(paramp->argv[i + 1], "a");
-      TIME_MSG("--- VIM STARTING ---");
+      time_start("--- NVIM STARTING ---");
       break;
     }
   }
-#endif
-  starttime = time(NULL);
-}
 
-/*
- * Allocate space for the generic buffers (needed for set_init_1() and
- * EMSG2()).
- */
-static void allocate_generic_buffers(void)
-{
-  NameBuff = xmalloc(MAXPATHL);
-  TIME_MSG("Allocated generic buffers");
+  starttime = time(NULL);
 }
 
 /*
@@ -1602,7 +1607,7 @@ static void check_tty(mparm_T *parmp)
       mch_errmsg(_("Vim: Warning: Input is not from a terminal\n"));
     out_flush();
     if (scriptin[0] == NULL)
-      ui_delay(2000L, TRUE);
+      ui_delay(2000L, true);
     TIME_MSG("Warning delay");
   }
 }
@@ -1793,7 +1798,7 @@ static void edit_buffers(mparm_T *parmp)
       } else {
         if (curwin->w_next == NULL)             /* just checking */
           break;
-        win_enter(curwin->w_next, FALSE);
+        win_enter(curwin->w_next, false);
       }
     }
     advance = TRUE;
@@ -1847,7 +1852,7 @@ static void edit_buffers(mparm_T *parmp)
       break;
     }
   }
-  win_enter(win, FALSE);
+  win_enter(win, false);
 
   --autocmd_no_leave;
   TIME_MSG("editing files in windows");
@@ -2097,9 +2102,9 @@ static int file_owned(char *fname)
 {
   uid_t uid = getuid();
   FileInfo file_info;
-  bool file_owned = os_get_file_info(fname, &file_info)
+  bool file_owned = os_fileinfo(fname, &file_info)
                     && file_info.stat.st_uid == uid;
-  bool link_owned = os_get_file_info_link(fname, &file_info)
+  bool link_owned = os_fileinfo_link(fname, &file_info)
                     && file_info.stat.st_uid == uid;
   return file_owned && link_owned;
 }
@@ -2214,11 +2219,11 @@ static void usage(void)
   main_msg(_("-s <scriptin>\tRead Normal mode commands from file <scriptin>"));
   main_msg(_("-w <scriptout>\tAppend all typed commands to file <scriptout>"));
   main_msg(_("-W <scriptout>\tWrite all typed commands to file <scriptout>"));
-#ifdef STARTUPTIME
   main_msg(_("--startuptime <file>\tWrite startup timing messages to <file>"));
-#endif
   main_msg(_("-i <viminfo>\t\tUse <viminfo> instead of .viminfo"));
-  main_msg(_("--api-msgpack-metadata\tDump API metadata information and exit"));
+  main_msg(_("--api-info\t\tDump API metadata serialized to msgpack and exit"));
+  main_msg(_("--embed\t\tUse stdin/stdout as a msgpack-rpc channel. "
+             "This can be used for embedding Neovim into other programs"));
   main_msg(_("-h  or  --help\tPrint Help (this message) and exit"));
   main_msg(_("--version\t\tPrint version information and exit"));
 
@@ -2240,92 +2245,5 @@ static void check_swap_exists_action(void)
 }
 
 #endif
-
-#endif
-
-#if defined(STARTUPTIME) || defined(PROTO)
-
-static struct timeval prev_timeval;
-
-
-/*
- * Save the previous time before doing something that could nest.
- * set "*tv_rel" to the time elapsed so far.
- */
-void time_push(void *tv_rel, void *tv_start)
-{
-  *((struct timeval *)tv_rel) = prev_timeval;
-  gettimeofday(&prev_timeval, NULL);
-  ((struct timeval *)tv_rel)->tv_usec = prev_timeval.tv_usec
-    - ((struct timeval *)tv_rel)->tv_usec;
-  ((struct timeval *)tv_rel)->tv_sec = prev_timeval.tv_sec
-    - ((struct timeval *)tv_rel)->tv_sec;
-  if (((struct timeval *)tv_rel)->tv_usec < 0) {
-    ((struct timeval *)tv_rel)->tv_usec += 1000000;
-    --((struct timeval *)tv_rel)->tv_sec;
-  }
-  *(struct timeval *)tv_start = prev_timeval;
-}
-
-/*
- * Compute the previous time after doing something that could nest.
- * Subtract "*tp" from prev_timeval;
- * Note: The arguments are (void *) to avoid trouble with systems that don't
- * have struct timeval.
- */
-void 
-time_pop (
-    void *tp        /* actually (struct timeval *) */
-)
-{
-  prev_timeval.tv_usec -= ((struct timeval *)tp)->tv_usec;
-  prev_timeval.tv_sec -= ((struct timeval *)tp)->tv_sec;
-  if (prev_timeval.tv_usec < 0) {
-    prev_timeval.tv_usec += 1000000;
-    --prev_timeval.tv_sec;
-  }
-}
-
-static void time_diff(struct timeval *then, struct timeval *now)
-{
-  long usec;
-  long msec;
-
-  usec = now->tv_usec - then->tv_usec;
-  msec = (now->tv_sec - then->tv_sec) * 1000L + usec / 1000L,
-       usec = usec % 1000L;
-  fprintf(time_fd, "%03ld.%03ld", msec, usec >= 0 ? usec : usec + 1000L);
-}
-
-void 
-time_msg (
-    char *mesg,
-    void *tv_start      /* only for do_source: start time; actually
-                                 (struct timeval *) */
-)
-{
-  static struct timeval start;
-  struct timeval now;
-
-  if (time_fd != NULL) {
-    if (strstr(mesg, "STARTING") != NULL) {
-      gettimeofday(&start, NULL);
-      prev_timeval = start;
-      fprintf(time_fd, "\n\ntimes in msec\n");
-      fprintf(time_fd, " clock   self+sourced   self:  sourced script\n");
-      fprintf(time_fd, " clock   elapsed:              other lines\n\n");
-    }
-    gettimeofday(&now, NULL);
-    time_diff(&start, &now);
-    if (((struct timeval *)tv_start) != NULL) {
-      fprintf(time_fd, "  ");
-      time_diff(((struct timeval *)tv_start), &now);
-    }
-    fprintf(time_fd, "  ");
-    time_diff(&prev_timeval, &now);
-    prev_timeval = now;
-    fprintf(time_fd, ": %s\n", mesg);
-  }
-}
 
 #endif

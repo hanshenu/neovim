@@ -10,13 +10,54 @@
 
 #include <stdbool.h>
 
+// EXTERN is only defined in main.c. That's where global variables are
+// actually defined and initialized.
+#ifndef EXTERN
+# define EXTERN extern
+# define INIT(x)
+#else
+# ifndef INIT
+#  define INIT(x) x
+#  define DO_INIT
+# endif
+#endif
+
 #include "nvim/ex_eval.h"
 #include "nvim/mbyte.h"
 #include "nvim/menu.h"
+#include "nvim/syntax_defs.h"
+#include "nvim/types.h"
 
 /*
  * definition of global variables
  */
+
+#define IOSIZE         (1024+1)          // file I/O and sprintf buffer size
+
+#define MAX_MCO        6                 // maximum value for 'maxcombine'
+
+# define MSG_BUF_LEN 480                 // length of buffer for small messages
+# define MSG_BUF_CLEN  (MSG_BUF_LEN / 6) // cell length (worst case: utf-8
+                                         // takes 6 bytes for one cell)
+
+/*
+ * Maximum length of a path (for non-unix systems) Make it a bit long, to stay
+ * on the safe side.  But not too long to put on the stack.
+ * TODO(metrix78): Move this to os_defs.h
+ */
+#ifndef MAXPATHL
+# ifdef MAXPATHLEN
+#  define MAXPATHL  MAXPATHLEN
+# else
+#  define MAXPATHL  256
+# endif
+#endif
+
+
+/* Values for "starting" */
+#define NO_SCREEN       2       /* no screen updating yet */
+#define NO_BUFFERS      1       /* not all buffers loaded yet */
+/*			0	   not starting anymore */
 
 /*
  * Number of Rows and Columns in the screen.
@@ -31,6 +72,12 @@ EXTERN long Rows                        /* nr of rows in the screen */
 #endif
 ;
 EXTERN long Columns INIT(= 80);         /* nr of columns in the screen */
+
+/*
+ * The characters and attributes cached for the screen.
+ */
+typedef char_u schar_T;
+typedef unsigned short sattr_T;
 
 /*
  * The characters that are currently on the screen are kept in ScreenLines[].
@@ -212,6 +259,11 @@ EXTERN int ex_nesting_level INIT(= 0);          /* nesting level */
 EXTERN int debug_break_level INIT(= -1);        /* break below this level */
 EXTERN int debug_did_msg INIT(= FALSE);         /* did "debug mode" message */
 EXTERN int debug_tick INIT(= 0);                /* breakpoint change count */
+
+/* Values for "do_profiling". */
+#define PROF_NONE       0       /* profiling not started */
+#define PROF_YES        1       /* profiling busy */
+#define PROF_PAUSED     2       /* profiling paused */
 EXTERN int do_profiling INIT(= PROF_NONE);      /* PROF_ values */
 
 /*
@@ -297,6 +349,14 @@ EXTERN int may_garbage_collect INIT(= FALSE);
 EXTERN int want_garbage_collect INIT(= FALSE);
 EXTERN int garbage_collect_at_exit INIT(= FALSE);
 
+/* Special values for current_SID. */
+#define SID_MODELINE    -1      /* when using a modeline */
+#define SID_CMDARG      -2      /* for "--cmd" argument */
+#define SID_CARG        -3      /* for "-c" argument */
+#define SID_ENV         -4      /* for sourcing environment variable */
+#define SID_ERROR       -5      /* option was reset because of an error */
+#define SID_NONE        -6      /* don't set scriptID */
+
 /* ID of script being sourced or was sourced to define the current function. */
 EXTERN scid_T current_SID INIT(= 0);
 
@@ -325,6 +385,65 @@ EXTERN int need_check_timestamps INIT(= FALSE);      /* need to check file
 EXTERN int did_check_timestamps INIT(= FALSE);      /* did check timestamps
                                                        recently */
 EXTERN int no_check_timestamps INIT(= 0);       /* Don't check timestamps */
+
+/*
+ * Values for index in highlight_attr[].
+ * When making changes, also update HL_FLAGS below!  And update the default
+ * value of 'highlight' in option.c.
+ */
+typedef enum {
+  HLF_8 = 0         /* Meta & special keys listed with ":map", text that is
+                       displayed different from what it is */
+  , HLF_AT          /* @ and ~ characters at end of screen, characters that
+                       don't really exist in the text */
+  , HLF_D           /* directories in CTRL-D listing */
+  , HLF_E           /* error messages */
+  , HLF_I           /* incremental search */
+  , HLF_L           /* last search string */
+  , HLF_M           /* "--More--" message */
+  , HLF_CM          /* Mode (e.g., "-- INSERT --") */
+  , HLF_N           /* line number for ":number" and ":#" commands */
+  , HLF_CLN         /* current line number */
+  , HLF_R           /* return to continue message and yes/no questions */
+  , HLF_S           /* status lines */
+  , HLF_SNC         /* status lines of not-current windows */
+  , HLF_C           /* column to separate vertically split windows */
+  , HLF_T           /* Titles for output from ":set all", ":autocmd" etc. */
+  , HLF_V           /* Visual mode */
+  , HLF_VNC         /* Visual mode, autoselecting and not clipboard owner */
+  , HLF_W           /* warning messages */
+  , HLF_WM          /* Wildmenu highlight */
+  , HLF_FL          /* Folded line */
+  , HLF_FC          /* Fold column */
+  , HLF_ADD         /* Added diff line */
+  , HLF_CHD         /* Changed diff line */
+  , HLF_DED         /* Deleted diff line */
+  , HLF_TXD         /* Text Changed in diff line */
+  , HLF_CONCEAL     /* Concealed text */
+  , HLF_SC          /* Sign column */
+  , HLF_SPB         /* SpellBad */
+  , HLF_SPC         /* SpellCap */
+  , HLF_SPR         /* SpellRare */
+  , HLF_SPL         /* SpellLocal */
+  , HLF_PNI         /* popup menu normal item */
+  , HLF_PSI         /* popup menu selected item */
+  , HLF_PSB         /* popup menu scrollbar */
+  , HLF_PST         /* popup menu scrollbar thumb */
+  , HLF_TP          /* tabpage line */
+  , HLF_TPS         /* tabpage line selected */
+  , HLF_TPF         /* tabpage line filler */
+  , HLF_CUC         /* 'cursurcolumn' */
+  , HLF_CUL         /* 'cursurline' */
+  , HLF_MC          /* 'colorcolumn' */
+  , HLF_COUNT       /* MUST be the last one */
+} hlf_T;
+
+/* The HL_FLAGS must be in the same order as the HLF_ enums!
+ * When changing this also adjust the default for 'highlight'. */
+#define HL_FLAGS {'8', '@', 'd', 'e', 'i', 'l', 'm', 'M', 'n', 'N', 'r', 's', \
+                  'S', 'c', 't', 'v', 'V', 'w', 'W', 'f', 'F', 'A', 'C', 'D', \
+                  'T', '-', '>', 'B', 'P', 'R', 'L', '+', '=', 'x', 'X', '*', \
+                  '#', '_', '!', '.', 'o'}
 
 EXTERN int highlight_attr[HLF_COUNT];       /* Highl. attr for each context. */
 # define USER_HIGHLIGHT
@@ -359,8 +478,8 @@ EXTERN buf_T *au_pending_free_buf INIT(= NULL);
  */
 EXTERN int mouse_row;
 EXTERN int mouse_col;
-EXTERN int mouse_past_bottom INIT(= FALSE);     /* mouse below last line */
-EXTERN int mouse_past_eol INIT(= FALSE);        /* mouse right of line */
+EXTERN bool mouse_past_bottom INIT(= false);    /* mouse below last line */
+EXTERN bool mouse_past_eol INIT(= false);       /* mouse right of line */
 EXTERN int mouse_dragging INIT(= 0);            /* extending Visual area with
                                                    mouse dragging */
 /*
@@ -400,7 +519,7 @@ EXTERN win_T    *firstwin;              /* first window */
 EXTERN win_T    *lastwin;               /* last window */
 EXTERN win_T    *prevwin INIT(= NULL);  /* previous window */
 # define W_NEXT(wp) ((wp)->w_next)
-# define FOR_ALL_WINDOWS(wp) for (wp = firstwin; wp != NULL; wp = wp->w_next)
+# define FOR_ALL_WINDOWS(wp) for (win_T *wp = firstwin; wp != NULL; wp = wp->w_next)
 /*
  * When using this macro "break" only breaks out of the inner loop. Use "goto"
  * to break out of the tabpage loop.
@@ -437,6 +556,9 @@ EXTERN buf_T    *firstbuf INIT(= NULL); /* first buffer */
 EXTERN buf_T    *lastbuf INIT(= NULL);  /* last buffer */
 EXTERN buf_T    *curbuf INIT(= NULL);   /* currently active buffer */
 
+// Iterates over all buffers in the buffer list.
+# define FOR_ALL_BUFFERS(buf) for (buf_T *buf = firstbuf; buf != NULL; buf = buf->b_next)
+
 /* Flag that is set when switching off 'swapfile'.  It means that all blocks
  * are to be loaded into memory.  Shouldn't be global... */
 EXTERN int mf_dont_release INIT(= FALSE);       /* don't release blocks */
@@ -446,17 +568,13 @@ EXTERN int mf_dont_release INIT(= FALSE);       /* don't release blocks */
  * to this when the window is using the global argument list.
  */
 EXTERN alist_T global_alist;    /* global argument list */
+EXTERN int max_alist_id INIT(= 0);     ///< the previous argument list id
 EXTERN int arg_had_last INIT(= FALSE);      /* accessed last file in
                                                global_alist */
 
 EXTERN int ru_col;              /* column for ruler */
 EXTERN int ru_wid;              /* 'rulerfmt' width of ruler when non-zero */
 EXTERN int sc_col;              /* column for shown command */
-
-#ifdef TEMPDIRNAMES
-EXTERN char_u   *vim_tempdir INIT(= NULL); /* Name of Vim's own temp dir.
-                                              Ends in a slash. */
-#endif
 
 /*
  * When starting or exiting some things are done differently (e.g. screen
@@ -618,7 +736,7 @@ EXTERN int vr_lines_changed INIT(= 0);      /* #Lines changed by "gR" so far */
 EXTERN int enc_dbcs INIT(= 0);                  /* One of DBCS_xxx values if
                                                    DBCS encoding */
 EXTERN int enc_unicode INIT(= 0);       /* 2: UCS-2 or UTF-16, 4: UCS-4 */
-EXTERN int enc_utf8 INIT(= FALSE);              /* UTF-8 encoded Unicode */
+EXTERN bool enc_utf8 INIT(= false);             /* UTF-8 encoded Unicode */
 EXTERN int enc_latin1like INIT(= TRUE);         /* 'encoding' is latin1 comp. */
 EXTERN int has_mbyte INIT(= 0);                 /* any multi-byte encoding */
 
@@ -720,13 +838,19 @@ EXTERN char_u   *exe_name;              /* the name of the executable */
 EXTERN int dont_scroll INIT(= FALSE);     /* don't use scrollbars when TRUE */
 #endif
 EXTERN int mapped_ctrl_c INIT(= FALSE);      /* CTRL-C is mapped */
-EXTERN int ctrl_c_interrupts INIT(= TRUE);      /* CTRL-C sets got_int */
+EXTERN bool ctrl_c_interrupts INIT(= true);  /* CTRL-C sets got_int */
 
 EXTERN cmdmod_T cmdmod;                 /* Ex command modifiers */
 
 EXTERN int msg_silent INIT(= 0);        /* don't print messages */
 EXTERN int emsg_silent INIT(= 0);       /* don't print error messages */
 EXTERN int cmd_silent INIT(= FALSE);      /* don't echo the command line */
+
+/* Values for swap_exists_action: what to do when swap file already exists */
+#define SEA_NONE        0       /* don't use dialog */
+#define SEA_DIALOG      1       /* use dialog when possible */
+#define SEA_QUIT        2       /* quit editing the file */
+#define SEA_RECOVER     3       /* recover the file */
 
 #define HAS_SWAP_EXISTS_ACTION
 EXTERN int swap_exists_action INIT(= SEA_NONE);
@@ -735,11 +859,9 @@ EXTERN int swap_exists_action INIT(= SEA_NONE);
 EXTERN int swap_exists_did_quit INIT(= FALSE);
 /* Selected "quit" at the dialog. */
 
-EXTERN char_u   IObuff[IOSIZE];         /* sprintf's are done in this buffer,
-                                           size is IOSIZE */
-EXTERN char_u   *NameBuff;              /* file names are expanded in this
-                                         * buffer, size is MAXPATHL */
-EXTERN char_u msg_buf[MSG_BUF_LEN];     /* small buffer for messages */
+EXTERN char_u IObuff[IOSIZE];       /* sprintf's are done in this buffer */
+EXTERN char_u NameBuff[MAXPATHL];   /* buffer for expanding file names */
+EXTERN char_u msg_buf[MSG_BUF_LEN]; /* small buffer for messages */
 
 /* When non-zero, postpone redrawing. */
 EXTERN int RedrawingDisabled INIT(= 0);
@@ -784,9 +906,6 @@ EXTERN int read_cmd_fd INIT(= 0);           /* fd to read commands from */
 /* volatile because it is used in signal handler catch_sigint(). */
 EXTERN volatile int got_int INIT(= FALSE);    /* set to TRUE when interrupt
                                                  signal occurred */
-#ifdef USE_TERM_CONSOLE
-EXTERN int term_console INIT(= FALSE);      /* set to TRUE when console used */
-#endif
 EXTERN int termcap_active INIT(= FALSE);        /* set by starttermcap() */
 EXTERN int cur_tmode INIT(= TMODE_COOK);        /* input terminal mode */
 EXTERN int bangredo INIT(= FALSE);          /* set to TRUE with ! command */
@@ -980,6 +1099,7 @@ EXTERN garray_T error_ga
  * Excluded are errors that are only used once and debugging messages.
  */
 EXTERN char_u e_abort[] INIT(= N_("E470: Command aborted"));
+EXTERN char_u e_api_spawn_failed[] INIT(= N_("E903: Could not spawn API job"));
 EXTERN char_u e_argreq[] INIT(= N_("E471: Argument required"));
 EXTERN char_u e_backslash[] INIT(= N_("E10: \\ should be followed by /, ? or &"));
 EXTERN char_u e_cmdwin[] INIT(= N_(
@@ -1101,9 +1221,7 @@ EXTERN char bot_top_msg[] INIT(= N_("search hit BOTTOM, continuing at TOP"));
 /* For undo we need to know the lowest time possible. */
 EXTERN time_t starttime;
 
-#ifdef STARTUPTIME
 EXTERN FILE *time_fd INIT(= NULL);  /* where to write startup timing */
-#endif
 
 /*
  * Some compilers warn for not using a return value, but in some situations we
@@ -1116,5 +1234,16 @@ EXTERN char *ignoredp;
 /* Temporarily moved these static variables to assist in migrating from
  * os_unix.c */
 EXTERN int curr_tmode INIT(= TMODE_COOK); /* contains current terminal mode */
+
+// If a msgpack-rpc channel should be started over stdin/stdout
+EXTERN bool embedded_mode INIT(= false);
+
+/// Used to track the status of external functions.
+/// Currently only used for iconv().
+typedef enum {
+  kUnknown,
+  kWorking,
+  kBroken
+} WorkingStatus;
 
 #endif /* NVIM_GLOBALS_H */

@@ -2,7 +2,11 @@
 ///
 /// code for digraphs
 
+#include <stdbool.h>
+#include <inttypes.h>
+
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/digraph.h"
 #include "nvim/charset.h"
 #include "nvim/ex_cmds2.h"
@@ -831,6 +835,8 @@ static digr_T digraphdefault[] =
   { 'W', '=', 0x20a9 },
   { '=', 'e', 0x20ac }, // euro
   { 'E', 'u', 0x20ac }, // euro
+  { '=', 'R', 0x20bd }, // rouble
+  { '=', 'P', 0x20bd }, // rouble
   { 'o', 'C', 0x2103 },
   { 'c', 'o', 0x2105 },
   { 'o', 'F', 0x2109 },
@@ -1523,7 +1529,7 @@ static int getexactdigraph(int char1, int char2, int meta_char)
     vc.vc_type = CONV_NONE;
 
     if (convert_setup(&vc, (char_u *)"utf-8", p_enc) == OK) {
-      vc.vc_fail = TRUE;
+      vc.vc_fail = true;
       to = string_convert(&vc, buf, &i);
 
       if (to != NULL) {

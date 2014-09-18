@@ -10,9 +10,13 @@
  * mark.c: functions for setting marks and jumping to them
  */
 
+#include <assert.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <string.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/mark.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -496,7 +500,6 @@ void fmarks_check_names(buf_T *buf)
 {
   char_u      *name;
   int i;
-  win_T       *wp;
 
   if (buf->b_ffname == NULL)
     return;
@@ -508,10 +511,10 @@ void fmarks_check_names(buf_T *buf)
   for (i = 0; i < NMARKS + EXTRA_MARKS; ++i)
     fmarks_check_one(&namedfm[i], name, buf);
 
-  FOR_ALL_WINDOWS(wp)
-  {
-    for (i = 0; i < wp->w_jumplistlen; ++i)
+  FOR_ALL_WINDOWS(wp) {
+    for (i = 0; i < wp->w_jumplistlen; ++i) {
       fmarks_check_one(&wp->w_jumplist[i], name, buf);
+    }
   }
 
   free(name);
@@ -1038,7 +1041,6 @@ void mark_col_adjust(linenr_T lnum, colnr_T mincol, long lnum_amount, long col_a
 {
   int i;
   int fnum = curbuf->b_fnum;
-  win_T       *win;
   pos_T       *posp;
 
   if ((col_amount == 0L && lnum_amount == 0L) || cmdmod.lockmarks)
@@ -1081,22 +1083,26 @@ void mark_col_adjust(linenr_T lnum, colnr_T mincol, long lnum_amount, long col_a
   /*
    * Adjust items in all windows related to the current buffer.
    */
-  FOR_ALL_WINDOWS(win)
-  {
+  FOR_ALL_WINDOWS(win) {
     /* marks in the jumplist */
-    for (i = 0; i < win->w_jumplistlen; ++i)
-      if (win->w_jumplist[i].fmark.fnum == fnum)
+    for (i = 0; i < win->w_jumplistlen; ++i) {
+      if (win->w_jumplist[i].fmark.fnum == fnum) {
         col_adjust(&(win->w_jumplist[i].fmark.mark));
+      }
+    }
 
     if (win->w_buffer == curbuf) {
       /* marks in the tag stack */
-      for (i = 0; i < win->w_tagstacklen; i++)
-        if (win->w_tagstack[i].fmark.fnum == fnum)
+      for (i = 0; i < win->w_tagstacklen; i++) {
+        if (win->w_tagstack[i].fmark.fnum == fnum) {
           col_adjust(&(win->w_tagstack[i].fmark.mark));
+        }
+      }
 
       /* cursor position for other windows with the same buffer */
-      if (win != curwin)
+      if (win != curwin) {
         col_adjust(&win->w_cursor);
+      }
     }
   }
 }
@@ -1333,7 +1339,6 @@ int removable(char_u *name)
 int write_viminfo_marks(FILE *fp_out)
 {
   int count;
-  buf_T       *buf;
   int is_mark_set;
   int i;
   win_T       *win;
@@ -1342,12 +1347,13 @@ int write_viminfo_marks(FILE *fp_out)
   /*
    * Set b_last_cursor for the all buffers that have a window.
    */
-  FOR_ALL_TAB_WINDOWS(tp, win)
-  set_last_cursor(win);
+  FOR_ALL_TAB_WINDOWS(tp, win) {
+    set_last_cursor(win);
+  }
 
   fputs(_("\n# History of marks within files (newest to oldest):\n"), fp_out);
   count = 0;
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+  FOR_ALL_BUFFERS(buf) {
     /*
      * Only write something if buffer has been loaded and at least one
      * mark is set.
@@ -1463,12 +1469,16 @@ void copy_viminfo_marks(vir_T *virp, FILE *fp_out, int count, int eof, int flags
       }
     } else { /* fp_out != NULL */
              /* This is slow if there are many buffers!! */
-      for (buf = firstbuf; buf != NULL; buf = buf->b_next)
-        if (buf->b_ffname != NULL) {
-          home_replace(NULL, buf->b_ffname, name_buf, LSIZE, TRUE);
-          if (fnamecmp(str, name_buf) == 0)
+      buf = NULL;
+      FOR_ALL_BUFFERS(bp) {
+        if (bp->b_ffname != NULL) {
+          home_replace(NULL, bp->b_ffname, name_buf, LSIZE, TRUE);
+          if (fnamecmp(str, name_buf) == 0) {
+            buf = bp;
             break;
+          }
         }
+      }
 
       /*
        * copy marks if the buffer has not been loaded
@@ -1518,10 +1528,7 @@ void copy_viminfo_marks(vir_T *virp, FILE *fp_out, int count, int eof, int flags
         fputs((char *)line, fp_out);
     }
     if (load_marks) {
-      win_T       *wp;
-
-      FOR_ALL_WINDOWS(wp)
-      {
+      FOR_ALL_WINDOWS(wp) {
         if (wp->w_buffer == curbuf)
           wp->w_changelistidx = curbuf->b_changelistlen;
       }

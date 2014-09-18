@@ -3,6 +3,7 @@
 /// Functions for handling growing arrays.
 
 #include <string.h>
+#include <inttypes.h>
 
 #include "nvim/vim.h"
 #include "nvim/ascii.h"
@@ -132,6 +133,7 @@ void ga_remove_duplicate_strings(garray_T *gap)
 /// strings with sep as separator.
 ///
 /// @param gap
+/// @param sep
 ///
 /// @returns the concatenated strings
 char_u *ga_concat_strings_sep(const garray_T *gap, const char *sep)
@@ -158,7 +160,7 @@ char_u *ga_concat_strings_sep(const garray_T *gap, const char *sep)
     s = xstpcpy(s, strings[i]);
     s = xstpcpy(s, sep);
   }
-  s = xstpcpy(s, strings[nelem - 1]);
+  strcpy(s, strings[nelem - 1]);
 
   return (char_u *) ret;
 }

@@ -97,20 +97,23 @@
  */
 #define vim_isbreak(c) (breakat_flags[(char_u)(c)])
 
-#  define mch_fopen(n, p)       fopen((n), (p))
-#   define mch_open(n, m, p)    open((n), (m), (p))
-
-/* mch_open_rw(): invoke mch_open() with third argument for user R/W. */
-#if defined(UNIX)  /* open in rw------- mode */
-# define mch_open_rw(n, f)      mch_open((n), (f), (mode_t)0600)
+#ifdef BINARY_FILE_IO
+# define WRITEBIN   "wb"        /* no CR-LF translation */
+# define READBIN    "rb"
+# define APPENDBIN  "ab"
 #else
-#  define mch_open_rw(n, f)     mch_open((n), (f), 0)
+# define WRITEBIN   "w"
+# define READBIN    "r"
+# define APPENDBIN  "a"
 #endif
 
-#ifdef STARTUPTIME
-# define TIME_MSG(s) { if (time_fd != NULL) time_msg(s, NULL); }
+#  define mch_fopen(n, p)       fopen((n), (p))
+
+/* mch_open_rw(): invoke os_open() with third argument for user R/W. */
+#if defined(UNIX)  /* open in rw------- mode */
+# define mch_open_rw(n, f)      os_open((n), (f), (mode_t)0600)
 #else
-# define TIME_MSG(s)
+#  define mch_open_rw(n, f)     os_open((n), (f), 0)
 #endif
 
 # define REPLACE_NORMAL(s) (((s) & REPLACE_FLAG) && !((s) & VREPLACE_FLAG))
@@ -135,7 +138,7 @@
 /* Advance multi-byte pointer, do not skip over composing chars. */
 # define mb_cptr_adv(p)     p += \
   enc_utf8 ? utf_ptr2len(p) : has_mbyte ? (*mb_ptr2len)(p) : 1
-/* Backup multi-byte pointer. */
+/* Backup multi-byte pointer. Only use with "p" > "s" ! */
 # define mb_ptr_back(s, p)  p -= has_mbyte ? ((*mb_head_off)(s, p - 1) + 1) : 1
 /* get length of multi-byte char, not including composing chars */
 # define mb_cptr2len(p)     (enc_utf8 ? utf_ptr2len(p) : (*mb_ptr2len)(p))

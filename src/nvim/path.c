@@ -1,6 +1,12 @@
+
+#include <assert.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <stdbool.h>
 #include <stdlib.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/path.h"
 #include "nvim/charset.h"
 #include "nvim/eval.h"
@@ -55,10 +61,10 @@ FileComparison path_full_compare(char_u *s1, char_u *s2, int checkname)
   FileID file_id_1, file_id_2;
 
   expand_env(s1, exp1, MAXPATHL);
-  bool id_ok_1 = os_get_file_id((char *)exp1, &file_id_1);
-  bool id_ok_2 = os_get_file_id((char *)s2, &file_id_2);
+  bool id_ok_1 = os_fileid((char *)exp1, &file_id_1);
+  bool id_ok_2 = os_fileid((char *)s2, &file_id_2);
   if (!id_ok_1 && !id_ok_2) {
-    // If os_get_file_id() doesn't work, may compare the names.
+    // If os_fileid() doesn't work, may compare the names.
     if (checkname) {
       vim_FullName(exp1, full1, MAXPATHL, FALSE);
       vim_FullName(s2, full2, MAXPATHL, FALSE);
@@ -71,7 +77,7 @@ FileComparison path_full_compare(char_u *s1, char_u *s2, int checkname)
   if (!id_ok_1 || !id_ok_2) {
     return kOneFileMissing;
   }
-  if (os_file_id_equal(&file_id_1, &file_id_2)) {
+  if (os_fileid_equal(&file_id_1, &file_id_2)) {
     return kEqualFiles;
   }
   return kDifferentFiles;
@@ -122,6 +128,35 @@ char_u *path_tail_with_sep(char_u *fname)
   while (tail > past_head && after_pathsep(fname, tail)) {
     tail--;
   }
+  return tail;
+}
+
+/// Finds the path tail (or executable) in an invocation.
+///
+/// @param[in]  invocation A program invocation in the form:
+///                        "path/to/exe [args]".
+/// @param[out] len Stores the length of the executable name.
+///
+/// @post if `len` is not null, stores the length of the executable name.
+///
+/// @return The position of the last path separator + 1.
+const char_u *invocation_path_tail(const char_u *invocation, size_t *len)
+    FUNC_ATTR_NONNULL_RET FUNC_ATTR_NONNULL_ARG(1)
+{
+  const char_u *tail = get_past_head((char_u *) invocation);
+  const char_u *p = tail;
+  while (*p != NUL && *p != ' ') {
+    bool was_sep = vim_ispathsep_nocolon(*p);
+    mb_ptr_adv(p);
+    if (was_sep) {
+      tail = p;  // Now tail points one past the separator.
+    }
+  }
+
+  if (len != NULL) {
+    *len = (size_t)(p - tail);
+  }
+
   return tail;
 }
 
@@ -354,6 +389,19 @@ FullName_save (
 
   return new_fname;
 }
+
+/// Saves the absolute path.
+/// @param name An absolute or relative path.
+/// @return The absolute path of `name`.
+char_u *save_absolute_path(const char_u *name)
+  FUNC_ATTR_MALLOC FUNC_ATTR_NONNULL_RET FUNC_ATTR_NONNULL_ALL
+{
+  if (!path_is_absolute_path(name)) {
+    return FullName_save((char_u *) name, true);
+  }
+  return vim_strsave((char_u *) name);
+}
+
 
 #if !defined(NO_EXPANDPATH) || defined(PROTO)
 
@@ -891,9 +939,6 @@ expand_in_path (
 {
   char_u      *curdir;
   garray_T path_ga;
-  char_u      *files = NULL;
-  char_u      *s;       /* start */
-  char_u      *e;       /* end */
   char_u      *paths = NULL;
 
   curdir = xmalloc(MAXPATHL);
@@ -908,28 +953,8 @@ expand_in_path (
   paths = ga_concat_strings(&path_ga);
   ga_clear_strings(&path_ga);
 
-  files = globpath(paths, pattern, (flags & EW_ICASE) ? WILD_ICASE : 0);
+  globpath(paths, pattern, gap, (flags & EW_ICASE) ? WILD_ICASE : 0);
   free(paths);
-  if (files == NULL)
-    return 0;
-
-  /* Copy each path in files into gap */
-  s = e = files;
-  while (*s != NUL) {
-    while (*e != '\n' && *e != NUL)
-      e++;
-    if (*e == NUL) {
-      addfile(gap, s, flags);
-      break;
-    } else {
-      /* *e is '\n' */
-      *e = NUL;
-      addfile(gap, s, flags);
-      e++;
-      s = e;
-    }
-  }
-  free(files);
 
   return gap->ga_len;
 }
@@ -1207,7 +1232,7 @@ addfile (
     return;
 
   /* If the file isn't executable, may not add it.  Do accept directories. */
-  if (!isdir && (flags & EW_EXEC) && !os_can_exe(f))
+  if (!isdir && (flags & EW_EXEC) && !os_can_exe(f, NULL))
     return;
 
   char_u *p = xmalloc(STRLEN(f) + 1 + isdir);
@@ -1219,10 +1244,8 @@ addfile (
   /*
    * Append a slash or backslash after directory names if none is present.
    */
-#ifndef DONT_ADD_PATHSEP_TO_DIR
   if (isdir && (flags & EW_ADDSLASH))
     add_pathsep(p);
-#endif
   GA_APPEND(char_u *, gap, p);
 }
 #endif /* !NO_EXPANDPATH */
@@ -1294,7 +1317,7 @@ void simplify_filename(char_u *filename)
           saved_char = p[-1];
           p[-1] = NUL;
           FileInfo file_info;
-          if (!os_get_file_info_link((char *)filename, &file_info)) {
+          if (!os_fileinfo_link((char *)filename, &file_info)) {
             do_strip = TRUE;
           }
           p[-1] = saved_char;
@@ -1317,7 +1340,7 @@ void simplify_filename(char_u *filename)
              * components. */
             saved_char = *tail;
             *tail = NUL;
-            if (os_get_file_info((char *)filename, &file_info)) {
+            if (os_fileinfo((char *)filename, &file_info)) {
               do_strip = TRUE;
             }
             else
@@ -1333,15 +1356,15 @@ void simplify_filename(char_u *filename)
                * component's parent directory.) */
               FileInfo new_file_info;
               if (p == start && relative) {
-                os_get_file_info(".", &new_file_info);
+                os_fileinfo(".", &new_file_info);
               } else {
                 saved_char = *p;
                 *p = NUL;
-                os_get_file_info((char *)filename, &new_file_info);
+                os_fileinfo((char *)filename, &new_file_info);
                 *p = saved_char;
               }
 
-              if (!os_file_info_id_equal(&file_info, &new_file_info)) {
+              if (!os_fileinfo_id_equal(&file_info, &new_file_info)) {
                 do_strip = FALSE;
                 /* We don't disable stripping of later
                  * components since the unstripped path name is

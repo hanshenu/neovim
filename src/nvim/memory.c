@@ -1,6 +1,9 @@
  // Various routines dealing with allocation and deallocation of memory.
 
+#include <errno.h>
+#include <inttypes.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "nvim/vim.h"
 #include "nvim/misc2.h"
@@ -46,7 +49,7 @@
 
 /// Try to free memory. Used when trying to recover from out of memory errors.
 /// @see {xmalloc}
-static void try_to_free_memory()
+static void try_to_free_memory(void)
 {
   static bool trying_to_free = false;
   // avoid recursive calls
@@ -118,7 +121,8 @@ void *xmalloc(size_t size)
   void *ret = try_malloc(size);
 
   if (!ret) {
-    OUT_STR("Vim: Error: Out of memory.\n");
+    OUT_STR(e_outofmem);
+    out_char('\n');
     preserve_exit();
   }
   return ret;
@@ -144,7 +148,8 @@ void *xcalloc(size_t count, size_t size)
     if (!ret && (!count || !size))
       ret = calloc(1, 1);
     if (!ret) {
-      OUT_STR("Vim: Error: Out of memory.\n");
+      OUT_STR(e_outofmem);
+      out_char('\n');
       preserve_exit();
     }
   }
@@ -171,7 +176,8 @@ void *xrealloc(void *ptr, size_t size)
     if (!ret && !size)
       ret = realloc(ptr, 1);
     if (!ret) {
-      OUT_STR("Vim: Error: Out of memory.\n");
+      OUT_STR(e_outofmem);
+      out_char('\n');
       preserve_exit();
     }
   }
@@ -191,7 +197,7 @@ void *xmallocz(size_t size)
   void *ret;
 
   if (total_size < size) {
-    OUT_STR("Vim: Data too large to fit into virtual memory space\n");
+    OUT_STR(_("Vim: Data too large to fit into virtual memory space\n"));
     preserve_exit();
   }
 
@@ -313,7 +319,8 @@ char *xstrdup(const char *str)
     try_to_free_memory();
     ret = strdup(str);
     if (!ret) {
-      OUT_STR("Vim: Error: Out of memory.\n");
+      OUT_STR(e_outofmem);
+      out_char('\n');
       preserve_exit();
     }
   }
@@ -376,13 +383,13 @@ void do_outofmem_msg(size_t size)
 void free_all_mem(void)
 {
   buf_T       *buf, *nextbuf;
-  static int entered = FALSE;
+  static bool entered = false;
 
   /* When we cause a crash here it is caught and Vim tries to exit cleanly.
    * Don't try freeing everything again. */
   if (entered)
     return;
-  entered = TRUE;
+  entered = true;
 
   block_autocmds();         /* don't want to trigger autocommands here */
 
@@ -507,8 +514,6 @@ void free_all_mem(void)
   free_screenlines();
 
   clear_hl_tables();
-
-  free(NameBuff);
 }
 
 #endif

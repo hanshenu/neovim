@@ -1,6 +1,8 @@
 #ifndef NVIM_OPTION_DEFS_H
 #define NVIM_OPTION_DEFS_H
 
+#include <stdbool.h>
+
 #include "nvim/types.h"
 
 // option_defs.h: definition of global variables for settable options
@@ -49,7 +51,7 @@
 # define ENC_UCSBOM     "ucs-bom"       /* check for BOM at start of file */
 
 /* default value for 'encoding' */
-# define ENC_DFLT       "latin1"
+# define ENC_DFLT       "utf-8"
 
 /* end-of-line style */
 #define EOL_UNKNOWN     -1      /* not defined yet */
@@ -183,7 +185,8 @@
 #define SHM_SEARCH      's'             /* no search hit bottom messages */
 #define SHM_ATTENTION   'A'             /* no ATTENTION messages */
 #define SHM_INTRO       'I'             /* intro messages */
-#define SHM_ALL         "rmfixlnwaWtToOsAI" /* all possible flags for 'shm' */
+#define SHM_COMPLETIONMENU 'c'          // completion menu messages
+#define SHM_ALL         "rmfixlnwaWtToOsAIc" /* all possible flags for 'shm' */
 
 /* characters for p_go: */
 #define GO_ASEL         'a'             /* autoselect */
@@ -570,20 +573,20 @@ EXTERN char_u   *p_ttym;        /* 'ttymouse' */
 EXTERN unsigned ttym_flags;
 # ifdef IN_OPTION_C
 static char *(p_ttym_values[]) =
-{"xterm", "xterm2", "dec", "netterm", "jsbterm", "pterm", "urxvt", "sgr", NULL};
+{"xterm", "xterm2", "dec", "netterm", "pterm", "urxvt", "sgr", NULL};
 # endif
 # define TTYM_XTERM             0x01
 # define TTYM_XTERM2            0x02
 # define TTYM_DEC               0x04
 # define TTYM_NETTERM           0x08
-# define TTYM_JSBTERM           0x10
-# define TTYM_PTERM             0x20
-# define TTYM_URXVT             0x40
-# define TTYM_SGR               0x80
+# define TTYM_PTERM             0x10
+# define TTYM_URXVT             0x20
+# define TTYM_SGR               0x40
 #endif
 EXTERN char_u   *p_udir;        /* 'undodir' */
 EXTERN long p_ul;               /* 'undolevels' */
 EXTERN long p_ur;               /* 'undoreload' */
+EXTERN int p_unc;               /* 'unnamedclip' */
 EXTERN long p_uc;               /* 'updatecount' */
 EXTERN long p_ut;               /* 'updatetime' */
 EXTERN char_u   *p_fcs;         /* 'fillchar' */
@@ -623,7 +626,7 @@ EXTERN long p_wh;               /* 'winheight' */
 EXTERN long p_wmh;              /* 'winminheight' */
 EXTERN long p_wmw;              /* 'winminwidth' */
 EXTERN long p_wiw;              /* 'winwidth' */
-EXTERN int p_ws;                /* 'wrapscan' */
+EXTERN bool p_ws;               /* 'wrapscan' */
 EXTERN int p_write;             /* 'write' */
 EXTERN int p_wa;                /* 'writeany' */
 EXTERN int p_wb;                /* 'writebackup' */
@@ -679,6 +682,7 @@ enum {
   , BV_KMAP
   , BV_KP
   , BV_LISP
+  , BV_LW
   , BV_MA
   , BV_ML
   , BV_MOD
@@ -720,6 +724,8 @@ enum {
   , WV_COCU
   , WV_COLE
   , WV_CRBIND
+  , WV_BRI
+  , WV_BRIOPT
   , WV_DIFF
   , WV_FDC
   , WV_FEN

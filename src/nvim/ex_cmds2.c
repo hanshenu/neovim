@@ -10,9 +10,16 @@
  * ex_cmds2.c: some more functions for command line commands
  */
 
+#include <errno.h>
+#include <inttypes.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
+#ifdef HAVE_LOCALE_H
+# include <locale.h>
+#endif
 #include "nvim/version_defs.h"
 #include "nvim/ex_cmds2.h"
 #include "nvim/buffer.h"
@@ -43,9 +50,13 @@
 #include "nvim/term.h"
 #include "nvim/undo.h"
 #include "nvim/window.h"
+#include "nvim/profile.h"
 #include "nvim/os/os.h"
 #include "nvim/os/shell.h"
 #include "nvim/os/fs_defs.h"
+#include "nvim/os/provider.h"
+#include "nvim/api/private/helpers.h"
+#include "nvim/api/private/defs.h"
 
 
 /* Growarray to store info about already sourced scripts.
@@ -737,192 +748,15 @@ void dbg_breakpoint(char_u *name, linenr_T lnum)
   debug_breakpoint_lnum = lnum;
 }
 
-
-/*
- * Store the current time in "tm".
- */
-void profile_start(proftime_T *tm)
-{
-  gettimeofday(tm, NULL);
-}
-
-/*
- * Compute the elapsed time from "tm" till now and store in "tm".
- */
-void profile_end(proftime_T *tm)
-{
-  proftime_T now;
-
-  gettimeofday(&now, NULL);
-  tm->tv_usec = now.tv_usec - tm->tv_usec;
-  tm->tv_sec = now.tv_sec - tm->tv_sec;
-  if (tm->tv_usec < 0) {
-    tm->tv_usec += 1000000;
-    --tm->tv_sec;
-  }
-}
-
-/*
- * Subtract the time "tm2" from "tm".
- */
-void profile_sub(proftime_T *tm, proftime_T *tm2)
-{
-  tm->tv_usec -= tm2->tv_usec;
-  tm->tv_sec -= tm2->tv_sec;
-  if (tm->tv_usec < 0) {
-    tm->tv_usec += 1000000;
-    --tm->tv_sec;
-  }
-}
-
-/*
- * Return a string that represents the time in "tm".
- * Uses a static buffer!
- */
-char * profile_msg(proftime_T *tm)
-{
-  static char buf[50];
-
-  sprintf(buf, "%3ld.%06ld", (long)tm->tv_sec, (long)tm->tv_usec);
-  return buf;
-}
-
-/*
- * Put the time "msec" past now in "tm".
- */
-void profile_setlimit(long msec, proftime_T *tm)
-{
-  if (msec <= 0)     /* no limit */
-    profile_zero(tm);
-  else {
-    long usec;
-
-    gettimeofday(tm, NULL);
-    usec = (long)tm->tv_usec + (long)msec * 1000;
-    tm->tv_usec = usec % 1000000L;
-    tm->tv_sec += usec / 1000000L;
-  }
-}
-
-/*
- * Return TRUE if the current time is past "tm".
- */
-int profile_passed_limit(proftime_T *tm)
-{
-  proftime_T now;
-
-  if (tm->tv_sec == 0)      /* timer was not set */
-    return FALSE;
-  gettimeofday(&now, NULL);
-  return now.tv_sec > tm->tv_sec
-         || (now.tv_sec == tm->tv_sec && now.tv_usec > tm->tv_usec);
-}
-
-/*
- * Set the time in "tm" to zero.
- */
-void profile_zero(proftime_T *tm)
-{
-  tm->tv_usec = 0;
-  tm->tv_sec = 0;
-}
-
-
-#include <math.h>
-
-/*
- * Divide the time "tm" by "count" and store in "tm2".
- */
-void profile_divide(proftime_T *tm, int count, proftime_T *tm2)
-{
-  if (count == 0)
-    profile_zero(tm2);
-  else {
-    double usec = (tm->tv_sec * 1000000.0 + tm->tv_usec) / count;
-
-    tm2->tv_sec = floor(usec / 1000000.0);
-    tm2->tv_usec = vim_round(usec - (tm2->tv_sec * 1000000.0));
-  }
-}
-
-/*
- * Functions for profiling.
- */
-static proftime_T prof_wait_time;
-
-/*
- * Add the time "tm2" to "tm".
- */
-void profile_add(proftime_T *tm, proftime_T *tm2)
-{
-  tm->tv_usec += tm2->tv_usec;
-  tm->tv_sec += tm2->tv_sec;
-  if (tm->tv_usec >= 1000000) {
-    tm->tv_usec -= 1000000;
-    ++tm->tv_sec;
-  }
-}
-
-/*
- * Add the "self" time from the total time and the children's time.
- */
-void profile_self(proftime_T *self, proftime_T *total, proftime_T *children)
-{
-  /* Check that the result won't be negative.  Can happen with recursive
-   * calls. */
-  if (total->tv_sec < children->tv_sec
-      || (total->tv_sec == children->tv_sec
-          && total->tv_usec <= children->tv_usec))
-    return;
-  profile_add(self, total);
-  profile_sub(self, children);
-}
-
-/*
- * Get the current waittime.
- */
-void profile_get_wait(proftime_T *tm)
-{
-  *tm = prof_wait_time;
-}
-
-/*
- * Subtract the passed waittime since "tm" from "tma".
- */
-void profile_sub_wait(proftime_T *tm, proftime_T *tma)
-{
-  proftime_T tm3 = prof_wait_time;
-
-  profile_sub(&tm3, tm);
-  profile_sub(tma, &tm3);
-}
-
-/*
- * Return TRUE if "tm1" and "tm2" are equal.
- */
-int profile_equal(proftime_T *tm1, proftime_T *tm2)
-{
-  return tm1->tv_usec == tm2->tv_usec && tm1->tv_sec == tm2->tv_sec;
-}
-
-/*
- * Return <0, 0 or >0 if "tm1" < "tm2", "tm1" == "tm2" or "tm1" > "tm2"
- */
-int profile_cmp(const proftime_T *tm1, const proftime_T *tm2)
-{
-  if (tm1->tv_sec == tm2->tv_sec)
-    return tm2->tv_usec - tm1->tv_usec;
-  return tm2->tv_sec - tm1->tv_sec;
-}
-
 static char_u   *profile_fname = NULL;
-static proftime_T pause_time;
 
 /*
  * ":profile cmd args"
  */
 void ex_profile(exarg_T *eap)
 {
+  static proftime_T pause_time;
+
   char_u      *e;
   int len;
 
@@ -934,18 +768,18 @@ void ex_profile(exarg_T *eap)
     free(profile_fname);
     profile_fname = vim_strsave(e);
     do_profiling = PROF_YES;
-    profile_zero(&prof_wait_time);
+    profile_set_wait(profile_zero());
     set_vim_var_nr(VV_PROFILING, 1L);
   } else if (do_profiling == PROF_NONE)
     EMSG(_("E750: First use \":profile start {fname}\""));
   else if (STRCMP(eap->arg, "pause") == 0) {
     if (do_profiling == PROF_YES)
-      profile_start(&pause_time);
+      pause_time = profile_start();
     do_profiling = PROF_PAUSED;
   } else if (STRCMP(eap->arg, "continue") == 0) {
     if (do_profiling == PROF_PAUSED) {
-      profile_end(&pause_time);
-      profile_add(&prof_wait_time, &pause_time);
+      pause_time = profile_end(pause_time);
+      profile_set_wait(profile_add(profile_get_wait(), pause_time));
     }
     do_profiling = PROF_YES;
   } else {
@@ -953,6 +787,22 @@ void ex_profile(exarg_T *eap)
     ex_breakadd(eap);
   }
 }
+
+void ex_python(exarg_T *eap)
+{
+  script_host_execute("python_execute", eap);
+}
+
+void ex_pyfile(exarg_T *eap)
+{
+  script_host_execute_file("python_execute_file", eap);
+}
+
+void ex_pydo(exarg_T *eap)
+{
+  script_host_do_range("python_do_range", eap);
+}
+
 
 /* Command line expansion for :profile. */
 static enum {
@@ -1041,8 +891,8 @@ void profile_dump(void)
 static void script_do_profile(scriptitem_T *si)
 {
   si->sn_pr_count = 0;
-  profile_zero(&si->sn_pr_total);
-  profile_zero(&si->sn_pr_self);
+  si->sn_pr_total = profile_zero();
+  si->sn_pr_self = profile_zero();
 
   ga_init(&si->sn_prl_ga, sizeof(sn_prl_T), 100);
   si->sn_prl_idx = -1;
@@ -1062,9 +912,9 @@ void script_prof_save(
   if (current_SID > 0 && current_SID <= script_items.ga_len) {
     si = &SCRIPT_ITEM(current_SID);
     if (si->sn_prof_on && si->sn_pr_nest++ == 0)
-      profile_start(&si->sn_pr_child);
+      si->sn_pr_child = profile_start();
   }
-  profile_get_wait(tm);
+  *tm = profile_get_wait();
 }
 
 /*
@@ -1077,10 +927,11 @@ void script_prof_restore(proftime_T *tm)
   if (current_SID > 0 && current_SID <= script_items.ga_len) {
     si = &SCRIPT_ITEM(current_SID);
     if (si->sn_prof_on && --si->sn_pr_nest == 0) {
-      profile_end(&si->sn_pr_child);
-      profile_sub_wait(tm, &si->sn_pr_child);       /* don't count wait time */
-      profile_add(&si->sn_pr_children, &si->sn_pr_child);
-      profile_add(&si->sn_prl_children, &si->sn_pr_child);
+      si->sn_pr_child = profile_end(si->sn_pr_child);
+      // don't count wait time
+      si->sn_pr_child = profile_sub_wait(*tm, si->sn_pr_child);
+      si->sn_pr_children = profile_add(si->sn_pr_children, si->sn_pr_child);
+      si->sn_prl_children = profile_add(si->sn_prl_children, si->sn_pr_child);
     }
   }
 }
@@ -1092,7 +943,7 @@ static proftime_T inchar_time;
  */
 void prof_inchar_enter(void)
 {
-  profile_start(&inchar_time);
+  inchar_time = profile_start();
 }
 
 /*
@@ -1100,8 +951,8 @@ void prof_inchar_enter(void)
  */
 void prof_inchar_exit(void)
 {
-  profile_end(&inchar_time);
-  profile_add(&prof_wait_time, &inchar_time);
+  inchar_time = profile_end(inchar_time);
+  profile_set_wait(profile_add(profile_get_wait(), inchar_time));
 }
 
 /*
@@ -1121,8 +972,8 @@ static void script_dump_profile(FILE *fd)
         fprintf(fd, "Sourced 1 time\n");
       else
         fprintf(fd, "Sourced %d times\n", si->sn_pr_count);
-      fprintf(fd, "Total time: %s\n", profile_msg(&si->sn_pr_total));
-      fprintf(fd, " Self time: %s\n", profile_msg(&si->sn_pr_self));
+      fprintf(fd, "Total time: %s\n", profile_msg(si->sn_pr_total));
+      fprintf(fd, " Self time: %s\n", profile_msg(si->sn_pr_self));
       fprintf(fd, "\n");
       fprintf(fd, "count  total (s)   self (s)\n");
 
@@ -1136,11 +987,11 @@ static void script_dump_profile(FILE *fd)
           pp = &PRL_ITEM(si, i);
           if (pp->snp_count > 0) {
             fprintf(fd, "%5d ", pp->snp_count);
-            if (profile_equal(&pp->sn_prl_total, &pp->sn_prl_self))
+            if (profile_equal(pp->sn_prl_total, pp->sn_prl_self))
               fprintf(fd, "           ");
             else
-              fprintf(fd, "%s ", profile_msg(&pp->sn_prl_total));
-            fprintf(fd, "%s ", profile_msg(&pp->sn_prl_self));
+              fprintf(fd, "%s ", profile_msg(pp->sn_prl_total));
+            fprintf(fd, "%s ", profile_msg(pp->sn_prl_self));
           } else
             fprintf(fd, "                            ");
           fprintf(fd, "%s", IObuff);
@@ -1192,17 +1043,18 @@ int autowrite(buf_T *buf, int forceit)
  */
 void autowrite_all(void)
 {
-  buf_T       *buf;
-
-  if (!(p_aw || p_awa) || !p_write)
+  if (!(p_aw || p_awa) || !p_write) {
     return;
-  for (buf = firstbuf; buf; buf = buf->b_next)
+  }
+
+  FOR_ALL_BUFFERS(buf) {
     if (bufIsChanged(buf) && !buf->b_p_ro) {
       (void)buf_write_all(buf, FALSE);
       /* an autocommand may have deleted the buffer */
       if (!buf_valid(buf))
         buf = firstbuf;
     }
+  }
 }
 
 /*
@@ -1218,15 +1070,14 @@ int check_changed(buf_T *buf, int flags)
              && ((flags & CCGD_MULTWIN) || buf->b_nwindows <= 1)
              && (!(flags & CCGD_AW) || autowrite(buf, forceit) == FAIL)) {
     if ((p_confirm || cmdmod.confirm) && p_write) {
-      buf_T       *buf2;
       int count = 0;
 
       if (flags & CCGD_ALLBUF)
-        for (buf2 = firstbuf; buf2 != NULL; buf2 = buf2->b_next)
-          if (bufIsChanged(buf2)
-              && (buf2->b_ffname != NULL
-                  ))
+        FOR_ALL_BUFFERS(buf2) {
+          if (bufIsChanged(buf2) && (buf2->b_ffname != NULL)) {
             ++count;
+          }
+        }
       if (!buf_valid(buf))
         /* Autocommand deleted buffer, oops!  It's not changed now. */
         return FALSE;
@@ -1259,7 +1110,6 @@ dialog_changed (
 {
   char_u buff[DIALOG_MSG_SIZE];
   int ret;
-  buf_T       *buf2;
   exarg_T ea;
 
   dialog_msg(buff, _("Save changes to \"%s\"?"),
@@ -1287,7 +1137,7 @@ dialog_changed (
      * Skip readonly buffers, these need to be confirmed
      * individually.
      */
-    for (buf2 = firstbuf; buf2 != NULL; buf2 = buf2->b_next) {
+    FOR_ALL_BUFFERS(buf2) {
       if (bufIsChanged(buf2)
           && (buf2->b_ffname != NULL
               )
@@ -1305,8 +1155,9 @@ dialog_changed (
     /*
      * mark all buffers as unchanged
      */
-    for (buf2 = firstbuf; buf2 != NULL; buf2 = buf2->b_next)
+    FOR_ALL_BUFFERS(buf2) {
       unchanged(buf2, TRUE);
+    }
   }
 }
 
@@ -1348,17 +1199,16 @@ check_changed_any (
 )
 {
   int ret = FALSE;
-  buf_T       *buf;
   int save;
   int i;
   int bufnum = 0;
   int bufcount = 0;
   int         *bufnrs;
   tabpage_T   *tp;
-  win_T       *wp;
 
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next)
+  FOR_ALL_BUFFERS(buf) {
     ++bufcount;
+  }
 
   if (bufcount == 0)
     return FALSE;
@@ -1368,19 +1218,27 @@ check_changed_any (
   /* curbuf */
   bufnrs[bufnum++] = curbuf->b_fnum;
   /* buf in curtab */
-  FOR_ALL_WINDOWS(wp)
-  if (wp->w_buffer != curbuf)
-    add_bufnum(bufnrs, &bufnum, wp->w_buffer->b_fnum);
+  FOR_ALL_WINDOWS(wp) {
+    if (wp->w_buffer != curbuf) {
+      add_bufnum(bufnrs, &bufnum, wp->w_buffer->b_fnum);
+    }
+  }
 
   /* buf in other tab */
-  for (tp = first_tabpage; tp != NULL; tp = tp->tp_next)
-    if (tp != curtab)
-      for (wp = tp->tp_firstwin; wp != NULL; wp = wp->w_next)
+  for (tp = first_tabpage; tp != NULL; tp = tp->tp_next) {
+    if (tp != curtab) {
+      for (win_T *wp = tp->tp_firstwin; wp != NULL; wp = wp->w_next) {
         add_bufnum(bufnrs, &bufnum, wp->w_buffer->b_fnum);
-  /* any other buf */
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next)
-    add_bufnum(bufnrs, &bufnum, buf->b_fnum);
+      }
+    }
+  }
 
+  /* any other buf */
+  FOR_ALL_BUFFERS(buf) {
+    add_bufnum(bufnrs, &bufnum, buf->b_fnum);
+  }
+
+  buf_T *buf = NULL;
   for (i = 0; i < bufnum; ++i) {
     buf = buflist_findnr(bufnrs[i]);
     if (buf == NULL)
@@ -1423,16 +1281,19 @@ check_changed_any (
   }
 
   /* Try to find a window that contains the buffer. */
-  if (buf != curbuf)
-    FOR_ALL_TAB_WINDOWS(tp, wp)
-    if (wp->w_buffer == buf) {
-      goto_tabpage_win(tp, wp);
-      /* Paranoia: did autocms wipe out the buffer with changes? */
-      if (!buf_valid(buf)) {
-        goto theend;
+  if (buf != curbuf) {
+    win_T *wp;
+    FOR_ALL_TAB_WINDOWS(tp, wp) {
+      if (wp->w_buffer == buf) {
+        goto_tabpage_win(tp, wp);
+        /* Paranoia: did autocms wipe out the buffer with changes? */
+        if (!buf_valid(buf)) {
+          goto theend;
+        }
+        goto buf_found;
       }
-      goto buf_found;
     }
+  }
 buf_found:
 
   /* Open the changed buffer in the current window. */
@@ -1534,17 +1395,17 @@ void get_arglist(garray_T *gap, char_u *str)
 
 /*
  * Parse a list of arguments (file names), expand them and return in
- * "fnames[fcountp]".  When "wig" is TRUE, removes files matching 'wildignore'.
+ * "fnames[fcountp]".  When "wig" is true, removes files matching 'wildignore'.
  * Return FAIL or OK.
  */
-int get_arglist_exp(char_u *str, int *fcountp, char_u ***fnamesp, int wig)
+int get_arglist_exp(char_u *str, int *fcountp, char_u ***fnamesp, bool wig)
 {
   garray_T ga;
   int i;
 
   get_arglist(&ga, str);
 
-  if (wig == TRUE)
+  if (wig)
     i = expand_wildcards(ga.ga_len, (char_u **)ga.ga_data,
         fcountp, fnamesp, EW_FILE|EW_NOTFOUND);
   else
@@ -1965,7 +1826,6 @@ void ex_listdo(exarg_T *eap)
   int i;
   win_T       *wp;
   tabpage_T   *tp;
-  buf_T       *buf;
   int next_fnum = 0;
   char_u      *save_ei = NULL;
   char_u      *p_shm_save;
@@ -2030,7 +1890,7 @@ void ex_listdo(exarg_T *eap)
         /* Remember the number of the next listed buffer, in case
          * ":bwipe" is used or autocommands do something strange. */
         next_fnum = -1;
-        for (buf = curbuf->b_next; buf != NULL; buf = buf->b_next)
+        for (buf_T *buf = curbuf->b_next; buf != NULL; buf = buf->b_next)
           if (buf->b_p_bl) {
             next_fnum = buf->b_fnum;
             break;
@@ -2045,12 +1905,18 @@ void ex_listdo(exarg_T *eap)
         /* Done? */
         if (next_fnum < 0)
           break;
+
         /* Check if the buffer still exists. */
-        for (buf = firstbuf; buf != NULL; buf = buf->b_next)
-          if (buf->b_fnum == next_fnum)
+        bool buf_still_exists = false;
+        FOR_ALL_BUFFERS(bp) {
+          if (bp->b_fnum == next_fnum) {
+            buf_still_exists = true;
             break;
-        if (buf == NULL)
+          }
+        }
+        if (!buf_still_exists) {
           break;
+        }
 
         /* Go to the next buffer.  Clear 'shm' to avoid that the file
          * message overwrites any output from the command. */
@@ -2365,9 +2231,9 @@ int source_level(void *cookie)
  */
 static FILE *fopen_noinh_readbin(char *filename)
 {
-  int fd_tmp = mch_open(filename, O_RDONLY, 0);
+  int fd_tmp = os_open(filename, O_RDONLY, 0);
 
-  if (fd_tmp == -1)
+  if (fd_tmp < 0)
     return NULL;
 
 # ifdef HAVE_FD_CLOEXEC
@@ -2409,10 +2275,6 @@ do_source (
   void                    *save_funccalp;
   int save_debug_break_level = debug_break_level;
   scriptitem_T            *si = NULL;
-#ifdef STARTUPTIME
-  struct timeval tv_rel;
-  struct timeval tv_start;
-#endif
   proftime_T wait_start;
 
   p = expand_env_save(fname);
@@ -2541,10 +2403,13 @@ do_source (
     firstline = p;
   }
 
-#ifdef STARTUPTIME
-  if (time_fd != NULL)
-    time_push(&tv_rel, &tv_start);
-#endif
+  // start measuring script load time if --startuptime was passed and
+  // time_fd was successfully opened afterwards.
+  proftime_T rel_time;
+  proftime_T start_time;
+  if (time_fd != NULL) {
+    time_push(&rel_time, &start_time);
+  }
 
   if (do_profiling == PROF_YES)
     prof_child_enter(&wait_start);              /* entering a child now */
@@ -2559,13 +2424,13 @@ do_source (
    */
   save_current_SID = current_SID;
   FileID file_id;
-  bool file_id_ok = os_get_file_id((char *)fname_exp, &file_id);
+  bool file_id_ok = os_fileid((char *)fname_exp, &file_id);
   for (current_SID = script_items.ga_len; current_SID > 0; --current_SID) {
     si = &SCRIPT_ITEM(current_SID);
     // Compare dev/ino when possible, it catches symbolic links.
     // Also compare file names, the inode may change when the file was edited.
     bool file_id_equal = file_id_ok && si->file_id_valid
-                         && os_file_id_equal(&(si->file_id), &file_id);
+                         && os_fileid_equal(&(si->file_id), &file_id);
     if (si->sn_name != NULL
         && (file_id_equal || fnamecmp(si->sn_name, fname_exp) == 0)) {
       break;
@@ -2603,8 +2468,8 @@ do_source (
     }
     if (si->sn_prof_on) {
       ++si->sn_pr_count;
-      profile_start(&si->sn_pr_start);
-      profile_zero(&si->sn_pr_children);
+      si->sn_pr_start = profile_start();
+      si->sn_pr_children = profile_zero();
     }
   }
 
@@ -2619,11 +2484,11 @@ do_source (
     /* Get "si" again, "script_items" may have been reallocated. */
     si = &SCRIPT_ITEM(current_SID);
     if (si->sn_prof_on) {
-      profile_end(&si->sn_pr_start);
-      profile_sub_wait(&wait_start, &si->sn_pr_start);
-      profile_add(&si->sn_pr_total, &si->sn_pr_start);
-      profile_self(&si->sn_pr_self, &si->sn_pr_start,
-          &si->sn_pr_children);
+      si->sn_pr_start = profile_end(si->sn_pr_start);
+      si->sn_pr_start = profile_sub_wait(wait_start, si->sn_pr_start);
+      si->sn_pr_total = profile_add(si->sn_pr_total, si->sn_pr_start);
+      si->sn_pr_self = profile_self(si->sn_pr_self, si->sn_pr_start,
+          si->sn_pr_children);
     }
   }
 
@@ -2638,13 +2503,12 @@ do_source (
       smsg((char_u *)_("continuing in %s"), sourcing_name);
     verbose_leave();
   }
-#ifdef STARTUPTIME
+
   if (time_fd != NULL) {
     vim_snprintf((char *)IObuff, IOSIZE, "sourcing %s", fname);
-    time_msg((char *)IObuff, &tv_start);
-    time_pop(&tv_rel);
+    time_msg((char *)IObuff, &start_time);
+    time_pop(rel_time);
   }
-#endif
 
   /*
    * After a "finish" in debug mode, need to break at first command of next
@@ -2942,14 +2806,14 @@ void script_line_start(void)
       /* Zero counters for a line that was not used before. */
       pp = &PRL_ITEM(si, si->sn_prl_ga.ga_len);
       pp->snp_count = 0;
-      profile_zero(&pp->sn_prl_total);
-      profile_zero(&pp->sn_prl_self);
+      pp->sn_prl_total = profile_zero();
+      pp->sn_prl_self = profile_zero();
       ++si->sn_prl_ga.ga_len;
     }
     si->sn_prl_execed = FALSE;
-    profile_start(&si->sn_prl_start);
-    profile_zero(&si->sn_prl_children);
-    profile_get_wait(&si->sn_prl_wait);
+    si->sn_prl_start = profile_start();
+    si->sn_prl_children = profile_zero();
+    si->sn_prl_wait = profile_get_wait();
   }
 }
 
@@ -2983,11 +2847,11 @@ void script_line_end(void)
     if (si->sn_prl_execed) {
       pp = &PRL_ITEM(si, si->sn_prl_idx);
       ++pp->snp_count;
-      profile_end(&si->sn_prl_start);
-      profile_sub_wait(&si->sn_prl_wait, &si->sn_prl_start);
-      profile_add(&pp->sn_prl_total, &si->sn_prl_start);
-      profile_self(&pp->sn_prl_self, &si->sn_prl_start,
-          &si->sn_prl_children);
+      si->sn_prl_start = profile_end(si->sn_prl_start);
+      si->sn_prl_start = profile_sub_wait(si->sn_prl_wait, si->sn_prl_start);
+      pp->sn_prl_total = profile_add(pp->sn_prl_total, si->sn_prl_start);
+      pp->sn_prl_self = profile_self(pp->sn_prl_self, si->sn_prl_start,
+          si->sn_prl_children);
     }
     si->sn_prl_idx = -1;
   }
@@ -3387,3 +3251,42 @@ char_u *get_locales(expand_T *xp, int idx)
 }
 
 #endif
+
+
+static void script_host_execute(char *method, exarg_T *eap)
+{
+  char *script = (char *)script_get(eap, eap->arg);
+
+  if (!eap->skip) {
+    Array args = ARRAY_DICT_INIT;
+    ADD(args, STRING_OBJ(cstr_to_string(script ? script : (char *)eap->arg)));
+    Object result = provider_call(method, args);
+    // We don't care about the result, so free it just in case a bad provider
+    // returned something
+    api_free_object(result);
+  }
+
+  free(script);
+}
+
+static void script_host_execute_file(char *method, exarg_T *eap)
+{
+  char buffer[MAXPATHL];
+  vim_FullName(eap->arg, (uint8_t *)buffer, sizeof(buffer), false);
+
+  Array args = ARRAY_DICT_INIT;
+  ADD(args, STRING_OBJ(cstr_to_string(buffer)));
+  Object result = provider_call(method, args);
+  api_free_object(result);
+}
+
+static void script_host_do_range(char *method, exarg_T *eap)
+{
+  Array args = ARRAY_DICT_INIT;
+  ADD(args, INTEGER_OBJ(eap->line1));
+  ADD(args, INTEGER_OBJ(eap->line2));
+  ADD(args, STRING_OBJ(cstr_to_string((char *)eap->arg)));
+  Object result = provider_call(method, args);
+  api_free_object(result);
+}
+

@@ -9,8 +9,12 @@
  * search.c: code for normal mode searching commands
  */
 
+#include <errno.h>
+#include <inttypes.h>
+#include <stdbool.h>
 #include <string.h>
 
+#include "nvim/ascii.h"
 #include "nvim/vim.h"
 #include "nvim/search.h"
 #include "nvim/charset.h"
@@ -526,7 +530,7 @@ int searchit(
                                ? lnum > stop_lnum : lnum < stop_lnum))
           break;
         /* Stop after passing the "tm" time limit. */
-        if (tm != NULL && profile_passed_limit(tm))
+        if (tm != NULL && profile_passed_limit(*tm))
           break;
 
         /*
@@ -795,7 +799,7 @@ int searchit(
         lnum = 1;
       if (!shortmess(SHM_SEARCH) && (options & SEARCH_MSG))
         give_warning((char_u *)_(dir == BACKWARD
-                ? top_bot_msg : bot_top_msg), TRUE);
+                ? top_bot_msg : bot_top_msg), true);
     }
     if (got_int || called_emsg
         || break_loop
@@ -1225,7 +1229,7 @@ int search_for_exact_line(buf_T *buf, pos_T *pos, int dir, char_u *pat)
       if (p_ws) {
         pos->lnum = buf->b_ml.ml_line_count;
         if (!shortmess(SHM_SEARCH))
-          give_warning((char_u *)_(top_bot_msg), TRUE);
+          give_warning((char_u *)_(top_bot_msg), true);
       } else {
         pos->lnum = 1;
         break;
@@ -1234,7 +1238,7 @@ int search_for_exact_line(buf_T *buf, pos_T *pos, int dir, char_u *pat)
       if (p_ws) {
         pos->lnum = 1;
         if (!shortmess(SHM_SEARCH))
-          give_warning((char_u *)_(bot_top_msg), TRUE);
+          give_warning((char_u *)_(bot_top_msg), true);
       } else {
         pos->lnum = 1;
         break;
@@ -2049,9 +2053,9 @@ showmatch (
        * available.
        */
       if (vim_strchr(p_cpo, CPO_SHOWMATCH) != NULL)
-        ui_delay(p_mat * 100L, TRUE);
+        ui_delay(p_mat * 100L, true);
       else if (!char_avail())
-        ui_delay(p_mat * 100L, FALSE);
+        ui_delay(p_mat * 100L, false);
       curwin->w_cursor = save_cursor;           /* restore cursor position */
       p_so = save_so;
       p_siso = save_siso;
@@ -2183,7 +2187,7 @@ found:
  */
 int 
 findpar (
-    int *pincl,         /* Return: TRUE if last char is to be included */
+    int *pincl,             /* Return: TRUE if last char is to be included */
     int dir,
     long count,
     int what,
@@ -3011,21 +3015,21 @@ current_block (
   }
   curwin->w_cursor = *end_pos;
 
-  /*
-   * Try to exclude the '(', '{', ')', '}', etc. when "include" is FALSE.
-   * If the ending '}' is only preceded by indent, skip that indent.
-   * But only if the resulting area is not smaller than what we started with.
-   */
+  // Try to exclude the '(', '{', ')', '}', etc. when "include" is FALSE.
+  // If the ending '}', ')' or ']' is only preceded by indent, skip that
+  // indent. But only if the resulting area is not smaller than what we
+  // started with.
   while (!include) {
     incl(&start_pos);
     sol = (curwin->w_cursor.col == 0);
     decl(&curwin->w_cursor);
-    if (what == '{')
-      while (inindent(1)) {
-        sol = TRUE;
-        if (decl(&curwin->w_cursor) != 0)
-          break;
+    while (inindent(1)) {
+      sol = TRUE;
+      if (decl(&curwin->w_cursor) != 0) {
+        break;
       }
+    }
+
     /*
      * In Visual mode, when the resulting area is not bigger than what we
      * started with, extend it to the next block, and then exclude again.
@@ -3162,10 +3166,10 @@ current_tagblock (
   int len;
   int r;
   int do_include = include;
-  int save_p_ws = p_ws;
+  bool save_p_ws = p_ws;
   int retval = FAIL;
 
-  p_ws = FALSE;
+  p_ws = false;
 
   old_pos = curwin->w_cursor;
   old_end = curwin->w_cursor;               /* remember where we started */
@@ -3758,29 +3762,21 @@ current_search (
     int forward                    /* move forward or backwards */
 )
 {
-  pos_T start_pos;              /* position before the pattern */
-  pos_T orig_pos;               /* position of the cursor at beginning */
-  pos_T pos;                    /* position after the pattern */
-  int i;
-  int dir;
-  int result;                   /* result of various function calls */
-  char_u old_p_ws = p_ws;
-  int flags = 0;
+  bool old_p_ws = p_ws;
   pos_T save_VIsual = VIsual;
-  int one_char;
 
   /* wrapping should not occur */
-  p_ws = FALSE;
+  p_ws = false;
 
   /* Correct cursor when 'selection' is exclusive */
   if (VIsual_active && *p_sel == 'e' && lt(VIsual, curwin->w_cursor))
     dec_cursor();
 
-  if (VIsual_active) {
-    orig_pos = curwin->w_cursor;
+  pos_T orig_pos;               /* position of the cursor at beginning */
+  pos_T pos;                    /* position after the pattern */
 
-    pos = curwin->w_cursor;
-    start_pos = VIsual;
+  if (VIsual_active) {
+    orig_pos = pos = curwin->w_cursor;
 
     /* make sure, searching further will extend the match */
     if (VIsual_active) {
@@ -3790,10 +3786,10 @@ current_search (
         decl(&pos);
     }
   } else
-    orig_pos = pos = start_pos = curwin->w_cursor;
+    orig_pos = pos = curwin->w_cursor;
 
   /* Is the pattern is zero-width? */
-  one_char = is_one_char(spats[last_idx].pat);
+  int one_char = is_one_char(spats[last_idx].pat);
   if (one_char == -1) {
     p_ws = old_p_ws;
     return FAIL;      /* pattern not found */
@@ -3804,17 +3800,14 @@ current_search (
    * so that a match at the current cursor position will be correctly
    * captured.
    */
-  for (i = 0; i < 2; i++) {
-    if (forward)
-      dir = i;
-    else
-      dir = !i;
+  for (int i = 0; i < 2; i++) {
+    int dir = forward ? i : !i;
+    int flags = 0;
 
-    flags = 0;
     if (!dir && !one_char)
       flags = SEARCH_END;
 
-    result = searchit(curwin, curbuf, &pos, (dir ? FORWARD : BACKWARD),
+    int result = searchit(curwin, curbuf, &pos, (dir ? FORWARD : BACKWARD),
         spats[last_idx].pat, (long) (i ? count : 1),
         SEARCH_KEEP | flags, RE_SEARCH, 0, NULL);
 
@@ -3841,13 +3834,13 @@ current_search (
     p_ws = old_p_ws;
   }
 
-  start_pos = pos;
-  flags = forward ? SEARCH_END : 0;
+  int flags = forward ? SEARCH_END : 0;
+  pos_T start_pos = pos;
 
   /* move to match, except for zero-width matches, in which case, we are
    * already on the next match */
   if (!one_char)
-    result = searchit(curwin, curbuf, &pos, (forward ? FORWARD : BACKWARD),
+    searchit(curwin, curbuf, &pos, (forward ? FORWARD : BACKWARD),
         spats[last_idx].pat, 0L, flags | SEARCH_KEEP, RE_SEARCH, 0, NULL);
 
   if (!VIsual_active)
@@ -4389,7 +4382,7 @@ search_line:
           /* ":psearch" uses the preview window */
           if (g_do_tagpreview != 0) {
             curwin_save = curwin;
-            prepare_tagpreview(TRUE);
+            prepare_tagpreview(true);
           }
           if (action == ACTION_SPLIT) {
             if (win_split(0, 0) == FAIL)
@@ -4424,7 +4417,7 @@ search_line:
           /* Return cursor to where we were */
           validate_cursor();
           redraw_later(VALID);
-          win_enter(curwin_save, TRUE);
+          win_enter(curwin_save, true);
         }
         break;
       }

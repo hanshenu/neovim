@@ -6,8 +6,10 @@
 
 #include "nvim/os/input.h"
 #include "nvim/os/event.h"
+#include "nvim/os/signal.h"
 #include "nvim/os/rstream_defs.h"
 #include "nvim/os/rstream.h"
+#include "nvim/ascii.h"
 #include "nvim/vim.h"
 #include "nvim/ui.h"
 #include "nvim/fileio.h"
@@ -31,27 +33,43 @@ static bool eof = false, started_reading = false;
 // Helper function used to push bytes from the 'event' key sequence partially
 // between calls to os_inchar when maxlen < 3
 
-void input_init()
+void input_init(void)
 {
-  read_stream = rstream_new(read_cb, READ_BUFFER_SIZE, NULL, false);
+  if (embedded_mode) {
+    return;
+  }
+
+  read_stream = rstream_new(read_cb, READ_BUFFER_SIZE, NULL, NULL);
   rstream_set_file(read_stream, read_cmd_fd);
 }
 
 // Listen for input
-void input_start()
+void input_start(void)
 {
+  if (embedded_mode) {
+    return;
+  }
+
   rstream_start(read_stream);
 }
 
 // Stop listening for input
-void input_stop()
+void input_stop(void)
 {
+  if (embedded_mode) {
+    return;
+  }
+
   rstream_stop(read_stream);
 }
 
 // Copies (at most `count`) of was read from `read_cmd_fd` into `buf`
 uint32_t input_read(char *buf, uint32_t count)
 {
+  if (embedded_mode) {
+    return 0;
+  }
+
   return rstream_read(read_stream, buf, count);
 }
 
@@ -104,14 +122,14 @@ int os_inchar(uint8_t *buf, int maxlen, int32_t ms, int tb_change_cnt)
 }
 
 // Check if a character is available for reading
-bool os_char_avail()
+bool os_char_avail(void)
 {
   return inbuf_poll(0) == kInputAvail;
 }
 
 // Check for CTRL-C typed by reading all available characters.
 // In cooked mode we should get SIGINT, no need to check.
-void os_breakcheck()
+void os_breakcheck(void)
 {
   if (curr_tmode == TMODE_RAW && input_poll(0))
     fill_input_buf(false);
@@ -128,7 +146,17 @@ bool os_isatty(int fd)
 
 static bool input_poll(int32_t ms)
 {
-  return input_ready() || event_poll(ms) || input_ready();
+  if (embedded_mode) {
+    EventSource input_sources[] = { signal_event_source(), NULL };
+    return event_poll(ms, input_sources);
+  }
+
+  EventSource input_sources[] = {
+    rstream_event_source(read_stream),
+    NULL
+  };
+
+  return input_ready() || event_poll(ms, input_sources) || input_ready();
 }
 
 // This is a replacement for the old `WaitForChar` function in os_unix.c
@@ -147,7 +175,7 @@ static InbufPollResult inbuf_poll(int32_t ms)
   return kInputNone;
 }
 
-static void stderr_switch()
+static void stderr_switch(void)
 {
   int mode = cur_tmode;
   // We probably set the wrong file descriptor to raw mode. Switch back to
@@ -197,7 +225,7 @@ static int push_event_key(uint8_t *buf, int maxlen)
 }
 
 // Check if there's pending input
-bool input_ready()
+bool input_ready(void)
 {
   return rstream_available(read_stream) > 0 || eof;
 }

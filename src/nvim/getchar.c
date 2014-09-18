@@ -15,9 +15,12 @@
  * mappings and abbreviations
  */
 
+#include <stdbool.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/getchar.h"
 #include "nvim/charset.h"
 #include "nvim/cursor.h"
@@ -46,6 +49,7 @@
 #include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/undo.h"
+#include "nvim/os/event.h"
 
 /*
  * These buffers are used for storing:
@@ -393,7 +397,7 @@ int stuff_empty(void)
  * Return TRUE if readbuf1 is empty.  There may still be redo characters in
  * redbuf2.
  */
-int readbuf1_empty()
+int readbuf1_empty(void)
 {
   return (readbuf1.bh_first.b_next == NULL);
 }
@@ -539,9 +543,7 @@ AppendToRedobuffLit (
     /* Put a string of normal characters in the redo buffer (that's
      * faster). */
     start = s;
-    while (*s >= ' '
-           && *s < DEL          /* EBCDIC: all chars above space are normal */
-           && (len < 0 || s - str < len))
+    while (*s >= ' ' && *s < DEL && (len < 0 || s - str < len))
       ++s;
 
     /* Don't put '0' or '^' as last character, just in case a CTRL-D is
@@ -563,7 +565,7 @@ AppendToRedobuffLit (
     if (c < ' ' || c == DEL || (*s == NUL && (c == '0' || c == '^')))
       add_char_buff(&redobuff, Ctrl_V);
 
-    /* CTRL-V '0' must be inserted as CTRL-V 048 (EBCDIC: xf0) */
+    /* CTRL-V '0' must be inserted as CTRL-V 048 */
     if (*s == NUL && c == '0')
       add_buff(&redobuff, (char_u *)"048", 3L);
     else
@@ -597,6 +599,13 @@ void AppendNumberToRedobuff(long n)
 void stuffReadbuff(char_u *s)
 {
   add_buff(&readbuf1, s, -1L);
+}
+
+/// Append string "s" to the redo stuff buffer.
+/// @remark CSI and K_SPECIAL must already have been escaped.
+void stuffRedoReadbuff(char_u *s)
+{
+  add_buff(&readbuf2, s, -1L);
 }
 
 void stuffReadbuffLen(char_u *s, long len)
@@ -2161,7 +2170,7 @@ static int vgetorpeek(int advance)
                 while (col < curwin->w_cursor.col) {
                   if (!vim_iswhite(ptr[col]))
                     curwin->w_wcol = vcol;
-                  vcol += lbr_chartabsize(ptr + col,
+                  vcol += lbr_chartabsize(ptr, ptr + col,
                       (colnr_T)vcol);
                   if (has_mbyte)
                     col += (*mb_ptr2len)(ptr + col);
@@ -2469,6 +2478,7 @@ inchar (
       char_u dum[DUM_LEN + 1];
 
       for (;; ) {
+        event_process();
         len = ui_inchar(dum, DUM_LEN, 0L, 0);
         if (len == 0 || (len == 1 && dum[0] == 3))
           break;
@@ -4073,7 +4083,7 @@ int put_escstr(FILE *fd, char_u *strstart, int what)
      */
     if (c == NL) {
       if (what == 2) {
-        if (fprintf(fd, IF_EB("\\\026\n", "\\" CTRL_V_STR "\n")) < 0)
+        if (fprintf(fd, "\\\026\n") < 0)
           return FAIL;
       } else {
         if (fprintf(fd, "<NL>") < 0)

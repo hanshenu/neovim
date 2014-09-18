@@ -80,9 +80,13 @@
 #define UH_MAGIC 0x18dade       /* value for uh_magic when in use */
 #define UE_MAGIC 0xabc123       /* value for ue_magic when in use */
 
+#include <inttypes.h>
+#include <errno.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/undo.h"
 #include "nvim/cursor.h"
 #include "nvim/edit.h"
@@ -103,6 +107,7 @@
 #include "nvim/screen.h"
 #include "nvim/sha256.h"
 #include "nvim/strings.h"
+#include "nvim/types.h"
 #include "nvim/os/os.h"
 #include "nvim/os/time.h"
 
@@ -913,7 +918,7 @@ static u_entry_T *unserialize_uep(FILE *fp, int *error, char_u *file_name)
   for (i = 0; i < uep->ue_size; ++i) {
     line_len = get4c(fp);
     if (line_len >= 0)
-      line = read_string(fp, line_len);
+      line = READ_STRING(fp, line_len);
     else {
       line = NULL;
       corruption_error("line length", file_name);
@@ -1041,7 +1046,7 @@ void u_write_undo(char_u *name, int forceit, buf_T *buf, char_u *hash)
   if (os_file_exists(file_name)) {
     if (name == NULL || !forceit) {
       /* Check we can read it and it's an undo file. */
-      fd = mch_open((char *)file_name, O_RDONLY, 0);
+      fd = os_open((char *)file_name, O_RDONLY, 0);
       if (fd < 0) {
         if (name != NULL || p_verbose > 0) {
           if (name == NULL)
@@ -1085,7 +1090,7 @@ void u_write_undo(char_u *name, int forceit, buf_T *buf, char_u *hash)
     goto theend;
   }
 
-  fd = mch_open((char *)file_name,
+  fd = os_open((char *)file_name,
       O_CREAT|O_WRONLY|O_EXCL|O_NOFOLLOW, perm);
   if (fd < 0) {
     EMSG2(_(e_not_open), file_name);
@@ -1111,13 +1116,10 @@ void u_write_undo(char_u *name, int forceit, buf_T *buf, char_u *hash)
    */
   FileInfo file_info_old;
   FileInfo file_info_new;
-  if (os_get_file_info((char *)buf->b_ffname, &file_info_old)
-      && os_get_file_info((char *)file_name, &file_info_new)
+  if (os_fileinfo((char *)buf->b_ffname, &file_info_old)
+      && os_fileinfo((char *)file_name, &file_info_new)
       && file_info_old.stat.st_gid != file_info_new.stat.st_gid
-# ifdef HAVE_FCHOWN  /* sequent-ptx lacks fchown() */
-      && fchown(fd, (uid_t)-1, file_info_old.stat.st_gid) != 0
-# endif
-      ) {
+      && os_fchown(fd, -1, file_info_old.stat.st_gid) != 0) {
     os_setperm(file_name, (perm & 0707) | ((perm & 07) << 3));
   }
 # ifdef HAVE_SELINUX
@@ -1247,8 +1249,8 @@ void u_read_undo(char_u *name, char_u *hash, char_u *orig_name)
      * owner of the text file or equal to the current user. */
     FileInfo file_info_orig;
     FileInfo file_info_undo;
-    if (os_get_file_info((char *)orig_name, &file_info_orig)
-        && os_get_file_info((char *)file_name, &file_info_undo)
+    if (os_fileinfo((char *)orig_name, &file_info_orig)
+        && os_fileinfo((char *)file_name, &file_info_undo)
         && file_info_orig.stat.st_uid != file_info_undo.stat.st_uid
         && file_info_undo.stat.st_uid != getuid()) {
       if (p_verbose > 0) {
@@ -1301,7 +1303,7 @@ void u_read_undo(char_u *name, char_u *hash, char_u *orig_name)
       if (name == NULL)
         verbose_enter();
       give_warning((char_u *)
-          _("File contents changed, cannot use undo info"), TRUE);
+          _("File contents changed, cannot use undo info"), true);
       if (name == NULL)
         verbose_leave();
     }
@@ -1313,7 +1315,7 @@ void u_read_undo(char_u *name, char_u *hash, char_u *orig_name)
   if (str_len < 0)
     goto error;
   if (str_len > 0)
-    line_ptr = read_string(fp, str_len);
+    line_ptr = READ_STRING(fp, str_len);
   line_lnum = (linenr_T)get4c(fp);
   line_colnr = (colnr_T)get4c(fp);
   if (line_lnum < 0 || line_colnr < 0) {
@@ -2189,12 +2191,10 @@ u_undo_end (
     u_add_time(msgbuf, sizeof(msgbuf), uhp->uh_time);
 
   {
-    win_T   *wp;
-
-    FOR_ALL_WINDOWS(wp)
-    {
-      if (wp->w_buffer == curbuf && wp->w_p_cole > 0)
+    FOR_ALL_WINDOWS(wp) {
+      if (wp->w_buffer == curbuf && wp->w_p_cole > 0) {
         redraw_win_later(wp, NOT_VALID);
+      }
     }
   }
 

@@ -1,22 +1,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 #include <uv.h>
 
 #include "nvim/os/channel.h"
 #include "nvim/os/server.h"
 #include "nvim/os/os.h"
+#include "nvim/ascii.h"
 #include "nvim/vim.h"
 #include "nvim/memory.h"
 #include "nvim/message.h"
-#include "nvim/fileio.h"
+#include "nvim/tempfile.h"
 #include "nvim/map.h"
 
 #define MAX_CONNECTIONS 32
 #define ADDRESS_MAX_SIZE 256
 #define NEOVIM_DEFAULT_TCP_PORT 7450
+#define LISTEN_ADDRESS_ENV_VAR "NVIM_LISTEN_ADDRESS"
 
 typedef enum {
   kServerTypeTcp,
@@ -47,21 +48,21 @@ static PMap(cstr_t) *servers = NULL;
 #endif
 
 /// Initializes the module
-void server_init()
+void server_init(void)
 {
   servers = pmap_new(cstr_t)();
 
-  if (!os_getenv("NEOVIM_LISTEN_ADDRESS")) {
-    char *listen_address = (char *)vim_tempname('s');
-    os_setenv("NEOVIM_LISTEN_ADDRESS", listen_address, 1);
+  if (!os_getenv(LISTEN_ADDRESS_ENV_VAR)) {
+    char *listen_address = (char *)vim_tempname();
+    os_setenv(LISTEN_ADDRESS_ENV_VAR, listen_address, 1);
     free(listen_address);
   }
 
-  server_start((char *)os_getenv("NEOVIM_LISTEN_ADDRESS"));
+  server_start((char *)os_getenv(LISTEN_ADDRESS_ENV_VAR));
 }
 
 /// Teardown the server module
-void server_teardown()
+void server_teardown(void)
 {
   if (!servers) {
     return;
@@ -81,10 +82,11 @@ void server_teardown()
 /// Starts listening on arbitrary tcp/unix addresses specified by
 /// `endpoint` for API calls. The type of socket used(tcp or unix/pipe) will
 /// be determined by parsing `endpoint`: If it's a valid tcp address in the
-/// 'ip:port' format, then it will be tcp socket, else it will be a unix
-/// socket or named pipe.
+/// 'ip[:port]' format, then it will be tcp socket. The port is optional
+/// and if omitted will default to NEOVIM_DEFAULT_TCP_PORT. Otherwise it will
+/// be a unix socket or named pipe.
 ///
-/// @param endpoint Address of the server. Either a 'ip:port' string or an
+/// @param endpoint Address of the server. Either a 'ip[:port]' string or an
 ///        arbitrary identifier(trimmed to 256 bytes) for the unix socket or
 ///        named pipe.
 void server_start(char *endpoint)
@@ -93,9 +95,9 @@ void server_start(char *endpoint)
 
   // Trim to `ADDRESS_MAX_SIZE`
   if (xstrlcpy(addr, endpoint, sizeof(addr)) >= sizeof(addr)) {
-      // TODO(aktau): since this is not what the user wanted, perhaps we
-      // should return an error here
-      EMSG2("Address was too long, truncated to %s", addr);
+    // TODO(aktau): since this is not what the user wanted, perhaps we
+    // should return an error here
+    EMSG2("Address was too long, truncated to %s", addr);
   }
 
   // Check if the server already exists
@@ -116,23 +118,22 @@ void server_start(char *endpoint)
 
   if (addr_len > sizeof(ip) - 1) {
     // Maximum length of an IP address buffer is 15(eg: 255.255.255.255)
-    addr_len = sizeof(ip);
+    addr_len = sizeof(ip) - 1;
   }
 
   // Extract the address part
-  xstrlcpy(ip, addr, addr_len);
+  xstrlcpy(ip, addr, addr_len + 1);
 
   int port = NEOVIM_DEFAULT_TCP_PORT;
 
   if (*ip_end == ':') {
-    char *port_end;
     // Extract the port
-    port = strtol(ip_end + 1, &port_end, 10);
-    errno = 0;
-
-    if (errno != 0 || port == 0 || port > 0xffff) {
+    long lport = strtol(ip_end + 1, NULL, 10); // NOLINT
+    if (lport <= 0 || lport > 0xffff) {
       // Invalid port, treat as named pipe or unix socket
       server_type = kServerTypePipe;
+    } else {
+      port = (int) lport;
     }
   }
 

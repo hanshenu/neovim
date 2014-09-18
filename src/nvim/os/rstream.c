@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -9,6 +10,7 @@
 #include "nvim/os/rstream.h"
 #include "nvim/os/event_defs.h"
 #include "nvim/os/event.h"
+#include "nvim/ascii.h"
 #include "nvim/vim.h"
 #include "nvim/memory.h"
 #include "nvim/log.h"
@@ -24,7 +26,8 @@ struct rstream {
   uv_file fd;
   rstream_cb cb;
   size_t buffer_size, rpos, wpos, fpos;
-  bool reading, free_handle, defer;
+  bool free_handle;
+  EventSource source_override;
 };
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS
@@ -38,25 +41,25 @@ struct rstream {
 ///        for reading with `rstream_read`
 /// @param buffer_size Size in bytes of the internal buffer.
 /// @param data Some state to associate with the `RStream` instance
-/// @param defer Flag that specifies if callback invocation should be deferred
-///        to vim main loop(as a KE_EVENT special key)
+/// @param source_override Replacement for the default source used in events
+///        emitted by this RStream. If NULL, the default is used.
 /// @return The newly-allocated `RStream` instance
 RStream * rstream_new(rstream_cb cb,
                       size_t buffer_size,
                       void *data,
-                      bool defer)
+                      EventSource source_override)
 {
   RStream *rv = xmalloc(sizeof(RStream));
   rv->buffer = xmalloc(buffer_size);
   rv->buffer_size = buffer_size;
   rv->data = data;
-  rv->defer = defer;
   rv->cb = cb;
   rv->rpos = rv->wpos = rv->fpos = 0;
   rv->stream = NULL;
   rv->fread_idle = NULL;
   rv->free_handle = false;
   rv->file_type = UV_UNKNOWN_HANDLE;
+  rv->source_override = source_override ? source_override : rv;
 
   return rv;
 }
@@ -147,7 +150,6 @@ void rstream_start(RStream *rstream)
   if (rstream->file_type == UV_FILE) {
     uv_idle_start(rstream->fread_idle, fread_idle_cb);
   } else {
-    rstream->reading = false;
     uv_read_start(rstream->stream, alloc_cb, read_cb);
   }
 }
@@ -211,15 +213,6 @@ size_t rstream_available(RStream *rstream)
   return rstream->wpos - rstream->rpos;
 }
 
-/// Sets the `defer` flag for a a RStream instance
-///
-/// @param rstream The RStream instance
-/// @param defer The new value for the flag
-void rstream_set_defer(RStream *rstream, bool defer)
-{
-  rstream->defer = defer;
-}
-
 /// Runs the read callback associated with the rstream
 ///
 /// @param event Object containing data necessary to invoke the callback
@@ -230,6 +223,11 @@ void rstream_read_event(Event event)
   rstream->cb(rstream, rstream->data, event.data.rstream.eof);
 }
 
+EventSource rstream_event_source(RStream *rstream)
+{
+  return rstream->source_override;
+}
+
 // Callbacks used by libuv
 
 // Called by libuv to allocate memory for reading.
@@ -237,16 +235,8 @@ static void alloc_cb(uv_handle_t *handle, size_t suggested, uv_buf_t *buf)
 {
   RStream *rstream = handle_get_rstream(handle);
 
-  if (rstream->reading) {
-    buf->len = 0;
-    return;
-  }
-
   buf->len = rstream->buffer_size - rstream->wpos;
   buf->base = rstream->buffer + rstream->wpos;
-
-  // Avoid `alloc_cb`, `alloc_cb` sequences on windows
-  rstream->reading = true;
 }
 
 // Callback invoked by libuv after it copies the data into the buffer provided
@@ -258,6 +248,9 @@ static void read_cb(uv_stream_t *stream, ssize_t cnt, const uv_buf_t *buf)
 
   if (cnt <= 0) {
     if (cnt != UV_ENOBUFS) {
+      DLOG("Closing RStream(address: %p, source: %p)",
+           rstream,
+           rstream_event_source(rstream));
       // Read error or EOF, either way stop the stream and invoke the callback
       // with eof == true
       uv_read_stop(stream);
@@ -272,13 +265,19 @@ static void read_cb(uv_stream_t *stream, ssize_t cnt, const uv_buf_t *buf)
   // Data was already written, so all we need is to update 'wpos' to reflect
   // the space actually used in the buffer.
   rstream->wpos += nread;
+  DLOG("Received %u bytes from RStream(address: %p, source: %p)",
+       (size_t)cnt,
+       rstream,
+       rstream_event_source(rstream));
 
   if (rstream->wpos == rstream->buffer_size) {
     // The last read filled the buffer, stop reading for now
     rstream_stop(rstream);
+    DLOG("Buffer for RStream(address: %p, source: %p) is full, stopping it",
+         rstream,
+         rstream_event_source(rstream));
   }
 
-  rstream->reading = false;
   emit_read_event(rstream, false);
 }
 
@@ -340,9 +339,13 @@ static void close_cb(uv_handle_t *handle)
 
 static void emit_read_event(RStream *rstream, bool eof)
 {
-  Event event;
-  event.type = kEventRStreamData;
-  event.data.rstream.ptr = rstream;
-  event.data.rstream.eof = eof;
-  event_push(event, rstream->defer);
+  Event event = {
+    .source = rstream_event_source(rstream),
+    .type = kEventRStreamData,
+    .data.rstream = {
+      .ptr = rstream,
+      .eof = eof
+    }
+  };
+  event_push(event);
 }

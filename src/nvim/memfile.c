@@ -31,9 +31,12 @@
  * file is opened.
  */
 
+#include <errno.h>
+#include <inttypes.h>
 #include <string.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/memfile.h"
 #include "nvim/fileio.h"
 #include "nvim/memline.h"
@@ -119,11 +122,11 @@ memfile_T *mf_open(char_u *fname, int flags)
    * mf_blocknr_max must be rounded up.
    */
   FileInfo file_info;
-  if (mfp->mf_fd >= 0
-      && os_get_file_info_fd(mfp->mf_fd, &file_info)
-      && file_info.stat.st_blksize >= MIN_SWAP_PAGE_SIZE
-      && file_info.stat.st_blksize <= MAX_SWAP_PAGE_SIZE) {
-    mfp->mf_page_size = file_info.stat.st_blksize;
+  if (mfp->mf_fd >= 0 && os_fileinfo_fd(mfp->mf_fd, &file_info)) {
+    uint64_t blocksize = os_fileinfo_blocksize(&file_info);
+    if (blocksize >= MIN_SWAP_PAGE_SIZE && blocksize <= MAX_SWAP_PAGE_SIZE) {
+      mfp->mf_page_size = blocksize;
+    }
   }
 
   if (mfp->mf_fd < 0 || (flags & (O_TRUNC|O_EXCL))
@@ -610,7 +613,6 @@ static bhdr_T *mf_release(memfile_T *mfp, int page_count)
 {
   bhdr_T      *hp;
   int need_release;
-  buf_T       *buf;
 
   /* don't release while in mf_close_file() */
   if (mf_dont_release)
@@ -629,11 +631,16 @@ static bhdr_T *mf_release(memfile_T *mfp, int page_count)
    */
   if (mfp->mf_fd < 0 && need_release && p_uc) {
     /* find for which buffer this memfile is */
-    for (buf = firstbuf; buf != NULL; buf = buf->b_next)
-      if (buf->b_ml.ml_mfp == mfp)
+    buf_T *buf = NULL;
+    FOR_ALL_BUFFERS(bp) {
+      if (bp->b_ml.ml_mfp == mfp) {
+        buf = bp;
         break;
-    if (buf != NULL && buf->b_may_swap)
+      }
+    }
+    if (buf != NULL && buf->b_may_swap) {
       ml_open_file(buf);
+    }
   }
 
   /*
@@ -683,12 +690,11 @@ static bhdr_T *mf_release(memfile_T *mfp, int page_count)
  */
 int mf_release_all(void)
 {
-  buf_T       *buf;
   memfile_T   *mfp;
   bhdr_T      *hp;
   int retval = FALSE;
 
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+  FOR_ALL_BUFFERS(buf) {
     mfp = buf->b_ml.ml_mfp;
     if (mfp != NULL) {
       /* If no swap file yet, may open one */
@@ -1011,7 +1017,7 @@ mf_do_open (
    */
   FileInfo file_info;
   if ((flags & O_CREAT)
-      && os_get_file_info_link((char *)mfp->mf_fname, &file_info)) {
+      && os_fileinfo_link((char *)mfp->mf_fname, &file_info)) {
     mfp->mf_fd = -1;
     EMSG(_("E300: Swap file already exists (symlink attack?)"));
   } else {

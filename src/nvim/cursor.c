@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <inttypes.h>
 
 #include "nvim/cursor.h"
 #include "nvim/charset.h"
@@ -9,6 +10,7 @@
 #include "nvim/move.h"
 #include "nvim/screen.h"
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "cursor.c.generated.h"
@@ -136,7 +138,7 @@ static int coladvance2(
     ptr = line;
     while (col <= wcol && *ptr != NUL) {
       /* Count a tab for what it's worth (if list mode not on) */
-      csize = win_lbr_chartabsize(curwin, ptr, col, &head);
+      csize = win_lbr_chartabsize(curwin, line, ptr, col, &head);
       mb_ptr_adv(ptr);
       col += csize;
     }

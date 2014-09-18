@@ -4,6 +4,10 @@
  * This file is included in "regexp.c".
  */
 
+#include <inttypes.h>
+#include <stdbool.h>
+
+#include "nvim/ascii.h"
 #include "nvim/misc2.h"
 #include "nvim/garray.h"
 
@@ -81,6 +85,7 @@ enum {
   NFA_COMPOSING,                    /* Next nodes in NFA are part of the
                                        composing multibyte char */
   NFA_END_COMPOSING,                /* End of a composing char in the NFA */
+  NFA_ANY_COMPOSING,                // \%C: Any composing characters.
   NFA_OPT_CHARS,                    /* \%[abc] */
 
   /* The following are used only in the postfix form, not in the NFA */
@@ -1346,6 +1351,10 @@ static int nfa_regatom(void)
       EMIT(NFA_VISUAL);
       break;
 
+    case 'C':
+      EMIT(NFA_ANY_COMPOSING);
+      break;
+
     case '[':
     {
       int n;
@@ -2255,6 +2264,7 @@ static void nfa_set_code(int c)
   case NFA_MARK_LT:       STRCPY(code, "NFA_MARK_LT "); break;
   case NFA_CURSOR:        STRCPY(code, "NFA_CURSOR "); break;
   case NFA_VISUAL:        STRCPY(code, "NFA_VISUAL "); break;
+  case NFA_ANY_COMPOSING: STRCPY(code, "NFA_ANY_COMPOSING "); break;
 
   case NFA_STAR:          STRCPY(code, "NFA_STAR "); break;
   case NFA_STAR_NONGREEDY: STRCPY(code, "NFA_STAR_NONGREEDY "); break;
@@ -2712,6 +2722,7 @@ static int nfa_max_width(nfa_state_T *startstate, int depth)
     case NFA_NLOWER_IC:
     case NFA_UPPER_IC:
     case NFA_NUPPER_IC:
+    case NFA_ANY_COMPOSING:
       /* possibly non-ascii */
       if (has_mbyte)
         len += 3;
@@ -3710,6 +3721,7 @@ static int match_follows(nfa_state_T *startstate, int depth)
       continue;
 
     case NFA_ANY:
+    case NFA_ANY_COMPOSING:
     case NFA_IDENT:
     case NFA_SIDENT:
     case NFA_KWORD:
@@ -3939,7 +3951,7 @@ skip_add:
 #endif
   switch (state->c) {
   case NFA_MATCH:
-    nfa_match = TRUE;
+    //nfa_match = TRUE;
     break;
 
   case NFA_SPLIT:
@@ -4569,6 +4581,7 @@ static int failure_chance(nfa_state_T *state, int depth)
 
   case NFA_MATCH:
   case NFA_MCLOSE:
+  case NFA_ANY_COMPOSING:
     /* empty match works always */
     return 0;
 
@@ -4947,6 +4960,11 @@ static int nfa_regmatch(nfa_regprog_T *prog, nfa_state_T *start, regsubs_T *subm
       switch (t->state->c) {
       case NFA_MATCH:
       {
+        // If the match ends before a composing characters and
+        // ireg_icombine is not set, that is not really a match.
+        if (enc_utf8 && !ireg_icombine && utf_iscomposing(curc)) {
+          break;
+        }
         nfa_match = TRUE;
         copy_sub(&submatch->norm, &t->subs.norm);
         if (nfa_has_zsubexpr)
@@ -5426,6 +5444,18 @@ static int nfa_regmatch(nfa_regprog_T *prog, nfa_state_T *start, regsubs_T *subm
         }
         break;
 
+      case NFA_ANY_COMPOSING:
+        // On a composing character skip over it.  Otherwise do
+        // nothing.  Always matches.
+        if (enc_utf8 && utf_iscomposing(curc)) {
+          add_off = clen;
+        } else {
+          add_here = TRUE;
+          add_off = 0;
+        }
+        add_state = t->state->out;
+        break;
+
       /*
        * Character classes like \a for alpha, \d for digit etc.
        */
@@ -5765,12 +5795,13 @@ static int nfa_regmatch(nfa_regprog_T *prog, nfa_state_T *start, regsubs_T *subm
 
         if (!result && ireg_ic)
           result = vim_tolower(c) == vim_tolower(curc);
-        /* If there is a composing character which is not being
-         * ignored there can be no match. Match with composing
-         * character uses NFA_COMPOSING above. */
-        if (result && enc_utf8 && !ireg_icombine
-            && clen != utf_char2len(curc))
-          result = FALSE;
+
+        // If ireg_icombine is not set only skip over the character
+        // itself.  When it is set skip over composing characters.
+        if (result && enc_utf8 && !ireg_icombine) {
+          clen = utf_char2len(curc);
+        }
+
         ADD_STATE_IF_MATCH(t->state);
         break;
       }
@@ -6334,38 +6365,42 @@ nfa_regexec_nl (
   return nfa_regexec_both(line, col) != 0;
 }
 
-/*
- * Match a regexp against multiple lines.
- * "rmp->regprog" is a compiled regexp as returned by vim_regcomp().
- * Uses curbuf for line count and 'iskeyword'.
- *
- * Return zero if there is no match.  Return number of lines contained in the
- * match otherwise.
- *
- * Note: the body is the same as bt_regexec() except for nfa_regexec_both()
- *
- * ! Also NOTE : match may actually be in another line. e.g.:
- * when r.e. is \nc, cursor is at 'a' and the text buffer looks like
- *
- * +-------------------------+
- * |a                        |
- * |b                        |
- * |c                        |
- * |                         |
- * +-------------------------+
- *
- * then nfa_regexec_multi() returns 3. while the original
- * vim_regexec_multi() returns 0 and a second call at line 2 will return 2.
- *
- * FIXME if this behavior is not compatible.
- */
-static long nfa_regexec_multi(rmp, win, buf, lnum, col, tm)
-regmmatch_T *rmp;
-win_T       *win;               /* window in which to search or NULL */
-buf_T       *buf;               /* buffer in which to search */
-linenr_T lnum;                  /* nr of line to start looking for match */
-colnr_T col;                    /* column to start looking for match */
-proftime_T  *tm;         /* timeout limit or NULL */
+/// Matches a regexp against multiple lines.
+/// "rmp->regprog" is a compiled regexp as returned by vim_regcomp().
+/// Uses curbuf for line count and 'iskeyword'.
+///
+/// @param win Window in which to search or NULL
+/// @param buf Buffer in which to search
+/// @param lnum Number of line to start looking for match
+/// @param col Column to start looking for match
+/// @param tm Timeout limit or NULL
+///
+/// @return Zero if there is no match and number of lines contained in the match
+/// otherwise.
+///
+/// @note The body is the same as bt_regexec() except for nfa_regexec_both()
+///
+/// @warning
+/// Match may actually be in another line. e.g.:
+/// when r.e. is \nc, cursor is at 'a' and the text buffer looks like
+///
+/// @par
+///
+///     +-------------------------+
+///     |a                        |
+///     |b                        |
+///     |c                        |
+///     |                         |
+///     +-------------------------+
+///
+/// @par
+/// then nfa_regexec_multi() returns 3. while the original vim_regexec_multi()
+/// returns 0 and a second call at line 2 will return 2.
+///
+/// @par
+/// FIXME if this behavior is not compatible.
+static long nfa_regexec_multi(regmmatch_T *rmp, win_T *win, buf_T *buf,
+                              linenr_T lnum, colnr_T col, proftime_T *tm)
 {
   reg_match = NULL;
   reg_mmatch = rmp;

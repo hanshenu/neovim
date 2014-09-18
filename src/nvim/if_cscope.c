@@ -7,8 +7,14 @@
  *
  * See README.txt for an overview of the Vim source code.
  */
+#include <stdbool.h>
+
+#include <assert.h>
+#include <errno.h>
+#include <inttypes.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/if_cscope.h"
 #include "nvim/charset.h"
 #include "nvim/eval.h"
@@ -22,6 +28,7 @@
 #include "nvim/quickfix.h"
 #include "nvim/strings.h"
 #include "nvim/tag.h"
+#include "nvim/tempfile.h"
 #include "nvim/ui.h"
 #include "nvim/window.h"
 #include "nvim/os/os.h"
@@ -466,7 +473,7 @@ cs_add_common (
   fname = (char *)vim_strnsave((char_u *)fname, len);
   free(fbuf);
   FileInfo file_info;
-  bool file_info_ok  = os_get_file_info(fname, &file_info);
+  bool file_info_ok  = os_fileinfo(fname, &file_info);
   if (!file_info_ok) {
 staterr:
     if (p_csverbose)
@@ -497,7 +504,7 @@ staterr:
     else
       (void)sprintf(fname2, "%s/%s", fname, CSCOPE_DBFILE);
 
-    file_info_ok = os_get_file_info(fname2, &file_info);
+    file_info_ok = os_fileinfo(fname2, &file_info);
     if (!file_info_ok) {
       if (p_csverbose)
         cs_stat_emsg(fname2);
@@ -1038,7 +1045,7 @@ static int cs_find_common(char *opt, char *pat, int forceit, int verbose, int us
   if (qfpos != NULL && *qfpos != '0' && totmatches > 0) {
     /* fill error list */
     FILE        *f;
-    char_u      *tmp = vim_tempname('c');
+    char_u      *tmp = vim_tempname();
     qf_info_T   *qi = NULL;
     win_T       *wp = NULL;
 
@@ -1174,7 +1181,7 @@ static int cs_insert_filelist(char *fname, char *ppath, char *flags,
   i = -1;   /* can be set to the index of an empty item in csinfo */
   for (j = 0; j < csinfo_size; j++) {
     if (csinfo[j].fname != NULL
-        && os_file_id_equal_file_info(&(csinfo[j].file_id), file_info)) {
+        && os_fileid_equal_fileinfo(&(csinfo[j].file_id), file_info)) {
       if (p_csverbose)
         (void)EMSG(_("E568: duplicate cscope database not added"));
       return -1;
@@ -1217,7 +1224,7 @@ static int cs_insert_filelist(char *fname, char *ppath, char *flags,
   } else
     csinfo[i].flags = NULL;
 
-  os_file_info_get_id(file_info, &(csinfo[i].file_id));
+  os_fileinfo_id(file_info, &(csinfo[i].file_id));
   return i;
 } /* cs_insert_filelist */
 
@@ -1886,7 +1893,7 @@ static void cs_release_csp(int i, int freefnpp)
       waitpid_errno = errno;
       if (pid != 0)
         break;          /* break unless the process is still running */
-      os_delay(50L, FALSE);       /* sleep 50 ms */
+      os_delay(50L, false);       /* sleep 50 ms */
     }
 # endif
     /*
@@ -1917,7 +1924,7 @@ static void cs_release_csp(int i, int freefnpp)
             alive = FALSE;             /* cscope process no longer exists */
             break;
           }
-          os_delay(50L, FALSE);           /* sleep 50ms */
+          os_delay(50L, false);           /* sleep 50ms */
         }
       }
       if (alive)

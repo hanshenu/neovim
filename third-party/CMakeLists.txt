@@ -43,20 +43,21 @@ if(CMAKE_GENERATOR MATCHES "Makefiles")
   set(MAKE_PRG "$(MAKE)")
 endif()
 
+set(DEPS_C_COMPILER "${CMAKE_C_COMPILER} ${CMAKE_C_COMPILER_ARG1}")
 
 include(ExternalProject)
 
-set(LIBUV_URL https://github.com/joyent/libuv/archive/v0.11.23.tar.gz)
-set(LIBUV_MD5 e02a3da9fba9ebe72a84e4abd312ee4d)
+set(LIBUV_URL https://github.com/joyent/libuv/archive/v0.11.28.tar.gz)
+set(LIBUV_MD5 1a849ba4fc571d531482ed74bc7aabc4)
 
-set(MSGPACK_URL https://github.com/msgpack/msgpack-c/releases/download/cpp-0.5.8/msgpack-0.5.8.tar.gz)
-set(MSGPACK_MD5 ea0bee0939d2980c0df91f0e4843ccc4)
+set(MSGPACK_URL https://github.com/msgpack/msgpack-c/archive/ecf4b09acd29746829b6a02939db91dfdec635b4.tar.gz)
+set(MSGPACK_MD5 3599eaf904b8ba0c36cea7ed80973364)
 
 set(LUAJIT_URL http://luajit.org/download/LuaJIT-2.0.3.tar.gz)
 set(LUAJIT_MD5 f14e9104be513913810cd59c8c658dc0)
 
-set(LUAROCKS_URL http://github.com/keplerproject/luarocks/archive/v2.1.2.tar.gz)
-set(LUAROCKS_MD5 df591c00a85d51fb754ec08c77896aad)
+set(LUAROCKS_URL https://github.com/keplerproject/luarocks/archive/0587afbb5fe8ceb2f2eea16f486bd6183bf02f29.tar.gz)
+set(LUAROCKS_MD5 0f53f42909fbcd2c88be303e8f970516)
 
 if(USE_BUNDLED_LIBUV)
   ExternalProject_Add(libuv
@@ -73,7 +74,7 @@ if(USE_BUNDLED_LIBUV)
       -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/DownloadAndExtractFile.cmake
     CONFIGURE_COMMAND sh ${DEPS_BUILD_DIR}/src/libuv/autogen.sh &&
       ${DEPS_BUILD_DIR}/src/libuv/configure --with-pic --disable-shared
-        --prefix=${DEPS_INSTALL_DIR} CC=${CMAKE_C_COMPILER}
+        --prefix=${DEPS_INSTALL_DIR} CC=${DEPS_C_COMPILER}
     INSTALL_COMMAND ${MAKE_PRG} install)
   list(APPEND THIRD_PARTY_DEPS libuv)
 endif()
@@ -91,9 +92,17 @@ if(USE_BUNDLED_MSGPACK)
       -DEXPECTED_MD5=${MSGPACK_MD5}
       -DTARGET=msgpack
       -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/DownloadAndExtractFile.cmake
-    CONFIGURE_COMMAND ${DEPS_BUILD_DIR}/src/msgpack/configure --disable-shared
-       --with-pic --prefix=${DEPS_INSTALL_DIR} CC=${CMAKE_C_COMPILER}
-    INSTALL_COMMAND ${MAKE_PRG} install)
+    CONFIGURE_COMMAND cmake ${DEPS_BUILD_DIR}/src/msgpack
+       -DMSGPACK_ENABLE_CXX=OFF
+       -DMSGPACK_BUILD_TESTS=OFF
+       -DCMAKE_INSTALL_PREFIX=${DEPS_INSTALL_DIR}
+       -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+       "-DCMAKE_C_FLAGS:STRING=${CMAKE_C_COMPILER_ARG1} -fPIC"
+    BUILD_COMMAND ${MAKE_PRG}
+    INSTALL_COMMAND ${CMAKE_COMMAND}
+      -DMAKE_PRG=${MAKE_PRG}
+      -DREMOVE_FILE_GLOB=${DEPS_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}msgpack*${CMAKE_SHARED_LIBRARY_SUFFIX}*
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallMsgpack.cmake)
   list(APPEND THIRD_PARTY_DEPS msgpack)
 endif()
 
@@ -113,8 +122,9 @@ if(USE_BUNDLED_LUAJIT)
     CONFIGURE_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_COMMAND ""
-    INSTALL_COMMAND ${MAKE_PRG} CC=${CMAKE_C_COMPILER}
+    INSTALL_COMMAND ${MAKE_PRG} CC=${DEPS_C_COMPILER}
                                 PREFIX=${DEPS_INSTALL_DIR}
+                                CFLAGS=-fPIC
                                 BUILDMODE=static
                                 install)
   list(APPEND THIRD_PARTY_DEPS luajit)
@@ -149,41 +159,33 @@ if(USE_BUNDLED_LUAROCKS)
     add_dependencies(luarocks luajit)
   endif()
 
-  add_custom_command(OUTPUT ${DEPS_BIN_DIR}/moon ${DEPS_BIN_DIR}/moonc
-    COMMAND ${DEPS_BIN_DIR}/luarocks ARGS install moonscript
-            --server=http://rocks.moonscript.org
-    DEPENDS luarocks)
-  add_custom_target(moonscript
-    DEPENDS ${DEPS_BIN_DIR}/moon ${DEPS_BIN_DIR}/moonc)
-
-  # Busted doesn't depend on luarocks, but luarocks is unhappy to have two
-  # instances running in parallel.  So we depend on moonscript to force it
-  # to be serialized.
   add_custom_command(OUTPUT ${DEPS_BIN_DIR}/busted
-    COMMAND ${DEPS_BIN_DIR}/luarocks ARGS install busted 1.10.0
-            --server=http://rocks.moonscript.org
-    DEPENDS moonscript)
+    COMMAND ${DEPS_BIN_DIR}/luarocks
+    ARGS build busted 2.0.rc3 CC=${DEPS_C_COMPILER} LD=${DEPS_C_COMPILER}
+    DEPENDS luarocks)
   add_custom_target(busted
     DEPENDS ${DEPS_BIN_DIR}/busted)
 
-  # Like busted dependency on moonscript, we add a dependency on busted
-  # to serialize the install
-  add_custom_command(OUTPUT ${DEPS_LIB_DIR}/luarocks/rocks/lua-cmsgpack
-    COMMAND ${DEPS_BIN_DIR}/luarocks ARGS install lua-cmsgpack
+  # lua-messagepack doesn't depend on busted, but luarocks is unhappy to have
+  # two instances running in parallel.  So we depend on busted to force it to
+  # be serialized.
+  add_custom_command(OUTPUT ${DEPS_LIB_DIR}/luarocks/rocks/lua-messagepack
+    COMMAND ${DEPS_BIN_DIR}/luarocks
+    ARGS build lua-messagepack CC=${DEPS_C_COMPILER} LD=${DEPS_C_COMPILER}
     DEPENDS busted)
-  add_custom_target(lua-cmsgpack
-    DEPENDS ${DEPS_LIB_DIR}/luarocks/rocks/lua-cmsgpack)
+  add_custom_target(lua-messagepack
+    DEPENDS ${DEPS_LIB_DIR}/luarocks/rocks/lua-messagepack)
 
-  # lpeg is a moonscript dependency, but since it is also required for
-  # normal compilation(even without unit testing) we better add it explicitly.
-  # Like before, depend on cmsgpack to ensure serialization of install commands
+  # Like before, depend on lua-messagepack to ensure serialization of install
+  # commands
   add_custom_command(OUTPUT ${DEPS_LIB_DIR}/luarocks/rocks/lpeg
-    COMMAND ${DEPS_BIN_DIR}/luarocks ARGS install lpeg
-    DEPENDS lua-cmsgpack)
+    COMMAND ${DEPS_BIN_DIR}/luarocks
+    ARGS build lpeg CC=${DEPS_C_COMPILER} LD=${DEPS_C_COMPILER}
+    DEPENDS lua-messagepack)
   add_custom_target(lpeg
     DEPENDS ${DEPS_LIB_DIR}/luarocks/rocks/lpeg)
 
-  list(APPEND THIRD_PARTY_DEPS moonscript busted lua-cmsgpack lpeg)
+  list(APPEND THIRD_PARTY_DEPS busted lua-messagepack lpeg)
 endif()
 
 add_custom_target(third-party ALL

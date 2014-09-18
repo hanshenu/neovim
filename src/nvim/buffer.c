@@ -24,9 +24,13 @@
  * The current implementation remembers all file names ever used.
  */
 
+#include <stdbool.h>
+#include <errno.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "nvim/api/private/handle.h"
+#include "nvim/ascii.h"
 #include "nvim/vim.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -111,9 +115,15 @@ open_buffer (
      * If we can't create one for the current buffer, take another buffer
      */
     close_buffer(NULL, curbuf, 0, FALSE);
-    for (curbuf = firstbuf; curbuf != NULL; curbuf = curbuf->b_next)
-      if (curbuf->b_ml.ml_mfp != NULL)
+
+    curbuf = NULL;
+    FOR_ALL_BUFFERS(buf) {
+      if (buf->b_ml.ml_mfp != NULL) {
+        curbuf = buf;
         break;
+      }
+    }
+
     /*
      * if there is no memfile at all, exit
      * This is OK, since there are no changes to lose.
@@ -256,11 +266,11 @@ open_buffer (
  */
 int buf_valid(buf_T *buf)
 {
-  buf_T       *bp;
-
-  for (bp = firstbuf; bp != NULL; bp = bp->b_next)
-    if (bp == buf)
+  FOR_ALL_BUFFERS(bp) {
+    if (bp == buf) {
       return TRUE;
+    }
+  }
   return FALSE;
 }
 
@@ -289,11 +299,9 @@ close_buffer (
     int abort_if_last
 )
 {
-  int is_curbuf;
-  int nwindows;
-  int unload_buf = (action != 0);
-  int del_buf = (action == DOBUF_DEL || action == DOBUF_WIPE);
-  int wipe_buf = (action == DOBUF_WIPE);
+  bool unload_buf = (action != 0);
+  bool del_buf = (action == DOBUF_DEL || action == DOBUF_WIPE);
+  bool wipe_buf = (action == DOBUF_WIPE);
 
   /*
    * Force unloading or deleting when 'bufhidden' says so.
@@ -301,14 +309,14 @@ close_buffer (
    * "hide" (otherwise we could never free or delete a buffer).
    */
   if (buf->b_p_bh[0] == 'd') {          /* 'bufhidden' == "delete" */
-    del_buf = TRUE;
-    unload_buf = TRUE;
+    del_buf = true;
+    unload_buf = true;
   } else if (buf->b_p_bh[0] == 'w') { /* 'bufhidden' == "wipe" */
-    del_buf = TRUE;
-    unload_buf = TRUE;
-    wipe_buf = TRUE;
+    del_buf = true;
+    unload_buf = true;
+    wipe_buf = true;
   } else if (buf->b_p_bh[0] == 'u')     /* 'bufhidden' == "unload" */
-    unload_buf = TRUE;
+    unload_buf = true;
 
   if (win != NULL) {
     /* Set b_last_cursor when closing the last window for the buffer.
@@ -329,14 +337,15 @@ close_buffer (
         FALSE, buf);
     if (!buf_valid(buf)) {
       /* Autocommands deleted the buffer. */
-aucmd_abort:
       EMSG(_(e_auabort));
       return;
     }
     buf->b_closing = FALSE;
-    if (abort_if_last && one_window())
+    if (abort_if_last && one_window()) {
       /* Autocommands made this the only window. */
-      goto aucmd_abort;
+      EMSG(_(e_auabort));
+      return;
+    }
 
     /* When the buffer becomes hidden, but is not unloaded, trigger
      * BufHidden */
@@ -344,18 +353,22 @@ aucmd_abort:
       buf->b_closing = TRUE;
       apply_autocmds(EVENT_BUFHIDDEN, buf->b_fname, buf->b_fname,
           FALSE, buf);
-      if (!buf_valid(buf))
+      if (!buf_valid(buf)) {
         /* Autocommands deleted the buffer. */
-        goto aucmd_abort;
+        EMSG(_(e_auabort));
+        return;
+      }
       buf->b_closing = FALSE;
-      if (abort_if_last && one_window())
+      if (abort_if_last && one_window()) {
         /* Autocommands made this the only window. */
-        goto aucmd_abort;
+        EMSG(_(e_auabort));
+        return;
+      }
     }
     if (aborting())         /* autocmds may abort script processing */
       return;
   }
-  nwindows = buf->b_nwindows;
+  int nwindows = buf->b_nwindows;
 
   /* decrease the link count from windows (unless not in any window) */
   if (buf->b_nwindows > 0)
@@ -376,7 +389,7 @@ aucmd_abort:
    */
   /* Remember if we are closing the current buffer.  Restore the number of
    * windows, so that autocommands in buf_freeall() don't get confused. */
-  is_curbuf = (buf == curbuf);
+  bool is_curbuf = (buf == curbuf);
   buf->b_nwindows = nwindows;
 
   buf_freeall(buf, (del_buf ? BFA_DEL : 0) + (wipe_buf ? BFA_WIPE : 0));
@@ -466,7 +479,7 @@ void buf_clear_file(buf_T *buf)
  */
 void buf_freeall(buf_T *buf, int flags)
 {
-  int is_curbuf = (buf == curbuf);
+  bool is_curbuf = (buf == curbuf);
 
   buf->b_closing = TRUE;
   apply_autocmds(EVENT_BUFUNLOAD, buf->b_fname, buf->b_fname, FALSE, buf);
@@ -505,9 +518,10 @@ void buf_freeall(buf_T *buf, int flags)
     win_T           *win;
     tabpage_T       *tp;
 
-    FOR_ALL_TAB_WINDOWS(tp, win)
-    if (win->w_buffer == buf)
-      clearFolding(win);
+    FOR_ALL_TAB_WINDOWS(tp, win) {
+      if (win->w_buffer == buf)
+        clearFolding(win);
+    }
   }
 
   ml_close(buf, TRUE);              /* close and delete the memline/memfile */
@@ -938,9 +952,13 @@ do_buffer (
      * If deleting the last (listed) buffer, make it empty.
      * The last (listed) buffer cannot be unloaded.
      */
-    for (bp = firstbuf; bp != NULL; bp = bp->b_next)
-      if (bp->b_p_bl && bp != buf)
+    bp = NULL;
+    FOR_ALL_BUFFERS(bp2) {
+      if (bp2->b_p_bl && bp2 != buf) {
+        bp = bp2;
         break;
+      }
+    }
     if (bp == NULL && buf == curbuf)
       return empty_curbuf(TRUE, forceit, action);
 
@@ -1039,9 +1057,12 @@ do_buffer (
     if (buf == NULL)            /* No loaded buffer, use unloaded one */
       buf = bp;
     if (buf == NULL) {          /* No loaded buffer, find listed one */
-      for (buf = firstbuf; buf != NULL; buf = buf->b_next)
-        if (buf->b_p_bl && buf != curbuf)
+      FOR_ALL_BUFFERS(buf2) {
+        if (buf2->b_p_bl && buf2 != curbuf) {
+          buf = buf2;
           break;
+        }
+      }
     }
     if (buf == NULL) {          /* Still no buffer, just take one */
       if (curbuf->b_next != NULL)
@@ -1293,7 +1314,7 @@ buflist_new (
    * for hard links. */
   FileID file_id;
   bool file_id_valid = (sfname != NULL &&
-                        os_get_file_id((char *)sfname, &file_id));
+                        os_fileid((char *)sfname, &file_id));
   if (ffname != NULL && !(flags & BLN_DUMMY)
       && (buf = buflist_findname_file_id(ffname, &file_id,
                                          file_id_valid)) != NULL) {
@@ -1405,7 +1426,7 @@ buflist_new (
       EMSG(_("W14: Warning: List of file names overflow"));
       if (emsg_silent == 0) {
         out_flush();
-        ui_delay(3000L, TRUE);          /* make sure it is noticed */
+        ui_delay(3000L, true);          /* make sure it is noticed */
       }
       top_file_num = 1;
     }
@@ -1509,6 +1530,7 @@ void free_buf_options(buf_T *buf, int free_p_ff)
   clear_string_option(&buf->b_p_qe);
   buf->b_p_ar = -1;
   buf->b_p_ul = NO_LOCAL_UNDOLEVEL;
+  clear_string_option(&buf->b_p_lw);
 }
 
 /*
@@ -1649,7 +1671,7 @@ buf_T *buflist_findname_exp(char_u *fname)
 buf_T *buflist_findname(char_u *ffname)
 {
   FileID file_id;
-  bool file_id_valid = os_get_file_id((char *)ffname, &file_id);
+  bool file_id_valid = os_fileid((char *)ffname, &file_id);
   return buflist_findname_file_id(ffname, &file_id, file_id_valid);
 }
 
@@ -1661,9 +1683,7 @@ buf_T *buflist_findname(char_u *ffname)
 static buf_T *buflist_findname_file_id(char_u *ffname, FileID *file_id,
                                        bool file_id_valid)
 {
-  buf_T       *buf;
-
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+  FOR_ALL_BUFFERS(buf) {
     if ((buf->b_flags & BF_DUMMY) == 0
         && !otherfile_buf(buf, ffname, file_id, file_id_valid)) {
       return buf;
@@ -1686,7 +1706,6 @@ buflist_findpat (
     int curtab_only                /* find buffers in current tab only */
 )
 {
-  buf_T       *buf;
   regprog_T   *prog;
   int match = -1;
   int find_listed;
@@ -1737,20 +1756,23 @@ buflist_findpat (
           return -1;
         }
 
-        for (buf = firstbuf; buf != NULL; buf = buf->b_next)
+        FOR_ALL_BUFFERS(buf) {
           if (buf->b_p_bl == find_listed
               && (!diffmode || diff_mode_buf(buf))
               && buflist_match(prog, buf) != NULL) {
             if (curtab_only) {
               /* Ignore the match if the buffer is not open in
                * the current tab. */
-              win_T       *wp;
-
-              for (wp = firstwin; wp != NULL; wp = wp->w_next)
-                if (wp->w_buffer == buf)
+              bool found_window = false;
+              FOR_ALL_WINDOWS(wp) {
+                if (wp->w_buffer == buf) {
+                  found_window = true;
                   break;
-              if (wp == NULL)
+                }
+              }
+              if (!found_window) {
                 continue;
+              }
             }
             if (match >= 0) {                   /* already found a match */
               match = -2;
@@ -1758,6 +1780,7 @@ buflist_findpat (
             }
             match = buf->b_fnum;                /* remember first match */
           }
+        }
 
         vim_regfree(prog);
         if (match >= 0)                         /* found one match */
@@ -1790,7 +1813,6 @@ buflist_findpat (
 int ExpandBufnames(char_u *pat, int *num_file, char_u ***file, int options)
 {
   int count = 0;
-  buf_T       *buf;
   int round;
   char_u      *p;
   int attempt;
@@ -1828,7 +1850,7 @@ int ExpandBufnames(char_u *pat, int *num_file, char_u ***file, int options)
      */
     for (round = 1; round <= 2; ++round) {
       count = 0;
-      for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+      FOR_ALL_BUFFERS(buf) {
         if (!buf->b_p_bl)               /* skip unlisted buffers */
           continue;
         p = buflist_match(prog, buf);
@@ -1912,13 +1934,15 @@ static char_u *fname_match(regprog_T *prog, char_u *name)
  */
 buf_T *buflist_findnr(int nr)
 {
-  buf_T       *buf;
-
-  if (nr == 0)
+  if (nr == 0) {
     nr = curwin->w_alt_fnum;
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next)
-    if (buf->b_fnum == nr)
+  }
+
+  FOR_ALL_BUFFERS(buf) {
+    if (buf->b_fnum == nr) {
       return buf;
+    }
+  }
   return NULL;
 }
 
@@ -1999,22 +2023,22 @@ static void buflist_setfpos(buf_T *buf, win_T *win, linenr_T lnum, colnr_T col, 
 
 
 /*
- * Return TRUE when "wip" has 'diff' set and the diff is only for another tab
+ * Return true when "wip" has 'diff' set and the diff is only for another tab
  * page.  That's because a diff is local to a tab page.
  */
-static int wininfo_other_tab_diff(wininfo_T *wip)
+static bool wininfo_other_tab_diff(wininfo_T *wip)
 {
-  win_T       *wp;
-
   if (wip->wi_opt.wo_diff) {
-    for (wp = firstwin; wp != NULL; wp = wp->w_next)
-      /* return FALSE when it's a window in the current tab page, thus
+    FOR_ALL_WINDOWS(wp) {
+      /* return false when it's a window in the current tab page, thus
        * the buffer was in diff mode here */
-      if (wip->wi_win == wp)
-        return FALSE;
-    return TRUE;
+      if (wip->wi_win == wp) {
+        return false;
+      }
+    }
+    return true;
   }
-  return FALSE;
+  return false;
 }
 
 /*
@@ -2200,7 +2224,7 @@ setfname (
      * - if the buffer is loaded, fail
      * - if the buffer is not loaded, delete it from the list
      */
-    file_id_valid = os_get_file_id((char *)ffname, &file_id);
+    file_id_valid = os_fileid((char *)ffname, &file_id);
     if (!(buf->b_flags & BF_DUMMY)) {
       obuf = buflist_findname_file_id(ffname, &file_id, file_id_valid);
     }
@@ -2215,10 +2239,6 @@ setfname (
       close_buffer(NULL, obuf, DOBUF_WIPE, FALSE);
     }
     sfname = vim_strsave(sfname);
-    if (ffname == NULL) {
-      free(sfname);
-      return FAIL;
-    }
 #ifdef USE_FNAME_CASE
     fname_case(sfname, 0);            /* set correct case for short file name */
 #endif
@@ -2339,9 +2359,7 @@ int buflist_add(char_u *fname, int flags)
  */
 void buflist_slash_adjust(void)
 {
-  buf_T       *bp;
-
-  for (bp = firstbuf; bp != NULL; bp = bp->b_next) {
+  FOR_ALL_BUFFERS(bp) {
     if (bp->b_ffname != NULL)
       slash_adjust(bp->b_ffname);
     if (bp->b_sfname != NULL)
@@ -2384,7 +2402,7 @@ static int otherfile_buf(buf_T *buf, char_u *ffname,
     /* If no struct stat given, get it now */
     if (file_id_p == NULL) {
       file_id_p = &file_id;
-      file_id_valid = os_get_file_id((char *)ffname, file_id_p);
+      file_id_valid = os_fileid((char *)ffname, file_id_p);
     }
     if (!file_id_valid) {
       // file_id not valid, assume files are different.
@@ -2414,7 +2432,7 @@ void buf_set_file_id(buf_T *buf)
 {
   FileID file_id;
   if (buf->b_fname != NULL
-      && os_get_file_id((char *)buf->b_fname, &file_id)) {
+      && os_fileid((char *)buf->b_fname, &file_id)) {
     buf->file_id_valid = true;
     buf->file_id = file_id;
   } else {
@@ -2426,7 +2444,7 @@ void buf_set_file_id(buf_T *buf)
 static bool buf_same_file_id(buf_T *buf, FileID *file_id)
 {
   return buf->file_id_valid
-         && os_file_id_equal(&(buf->file_id), file_id);
+         && os_fileid_equal(&(buf->file_id), file_id);
 }
 
 /*
@@ -3586,7 +3604,6 @@ do_arg_all (
 )
 {
   int i;
-  win_T       *wp, *wpnext;
   char_u      *opened;          /* Array of weight for which args are open:
                                  *  0: not opened
                                  *  1: opened in other tab
@@ -3636,8 +3653,9 @@ do_arg_all (
   if (had_tab > 0)
     goto_tabpage_tp(first_tabpage, TRUE, TRUE);
   for (;; ) {
+    win_T *wpnext = NULL;
     tpnext = curtab->tp_next;
-    for (wp = firstwin; wp != NULL; wp = wpnext) {
+    for (win_T *wp = firstwin; wp != NULL; wp = wpnext) {
       wpnext = wp->w_next;
       buf = wp->w_buffer;
       if (buf->b_ffname == NULL
@@ -3734,7 +3752,7 @@ do_arg_all (
   ++autocmd_no_leave;
   last_curwin = curwin;
   last_curtab = curtab;
-  win_enter(lastwin, FALSE);
+  win_enter(lastwin, false);
   /* ":drop all" should re-use an empty window to avoid "--remote-tab"
    * leaving an empty tab page when executed locally. */
   if (keep_tabs && bufempty() && curbuf->b_nwindows == 1
@@ -3747,13 +3765,14 @@ do_arg_all (
     if (opened[i] > 0) {
       /* Move the already present window to below the current window */
       if (curwin->w_arg_idx != i) {
-        for (wpnext = firstwin; wpnext != NULL; wpnext = wpnext->w_next) {
-          if (wpnext->w_arg_idx == i) {
+        FOR_ALL_WINDOWS(wp) {
+          if (wp->w_arg_idx == i) {
             if (keep_tabs) {
-              new_curwin = wpnext;
+              new_curwin = wp;
               new_curtab = curtab;
-            } else
-              win_move_after(wpnext, curwin);
+            } else {
+              win_move_after(wp, curwin);
+            }
             break;
           }
         }
@@ -3802,13 +3821,13 @@ do_arg_all (
     if (valid_tabpage(last_curtab))
       goto_tabpage_tp(last_curtab, TRUE, TRUE);
     if (win_valid(last_curwin))
-      win_enter(last_curwin, FALSE);
+      win_enter(last_curwin, false);
   }
   /* to window with first arg */
   if (valid_tabpage(new_curtab))
     goto_tabpage_tp(new_curtab, TRUE, TRUE);
   if (win_valid(new_curwin))
-    win_enter(new_curwin, FALSE);
+    win_enter(new_curwin, false);
 
   --autocmd_no_leave;
   free(opened);
@@ -3883,7 +3902,7 @@ void ex_buffer_all(exarg_T *eap)
    */
   /* Don't execute Win/Buf Enter/Leave autocommands here. */
   ++autocmd_no_enter;
-  win_enter(lastwin, FALSE);
+  win_enter(lastwin, false);
   ++autocmd_no_leave;
   for (buf = firstbuf; buf != NULL && open_wins < count; buf = buf->b_next) {
     /* Check if this buffer needs a window */
@@ -3963,7 +3982,7 @@ void ex_buffer_all(exarg_T *eap)
       cmdmod.tab = 9999;
   }
   --autocmd_no_enter;
-  win_enter(firstwin, FALSE);           /* back to first window */
+  win_enter(firstwin, false);           /* back to first window */
   --autocmd_no_leave;
 
   /*
@@ -4187,7 +4206,6 @@ int read_viminfo_bufferlist(vir_T *virp, int writing)
 
 void write_viminfo_bufferlist(FILE *fp)
 {
-  buf_T       *buf;
   win_T       *win;
   tabpage_T   *tp;
   char_u      *line;
@@ -4203,11 +4221,12 @@ void write_viminfo_bufferlist(FILE *fp)
 #define LINE_BUF_LEN (MAXPATHL + 40)
   line = xmalloc(LINE_BUF_LEN);
 
-  FOR_ALL_TAB_WINDOWS(tp, win)
-  set_last_cursor(win);
+  FOR_ALL_TAB_WINDOWS(tp, win) {
+    set_last_cursor(win);
+  }
 
   fputs(_("\n# Buffer list:\n"), fp);
-  for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
+  FOR_ALL_BUFFERS(buf) {
     if (buf->b_fname == NULL
         || !buf->b_p_bl
         || bt_quickfix(buf)
@@ -4241,7 +4260,7 @@ char_u *buf_spname(buf_T *buf)
      * For location list window, w_llist_ref points to the location list.
      * For quickfix window, w_llist_ref is NULL.
      */
-    if (find_win_for_buf(buf, &win, &tp) == OK && win->w_llist_ref != NULL)
+    if (find_win_for_buf(buf, &win, &tp) && win->w_llist_ref != NULL)
       return (char_u *)_(msg_loclist);
     else
       return (char_u *)_(msg_qflist);
@@ -4260,17 +4279,17 @@ char_u *buf_spname(buf_T *buf)
 
 /*
  * Find a window for buffer "buf".
- * If found OK is returned and "wp" and "tp" are set to the window and tabpage.
- * If not found FAIL is returned.
+ * If found true is returned and "wp" and "tp" are set to the window and tabpage.
+ * If not found false is returned.
  */
-int find_win_for_buf(buf_T *buf, win_T **wp, tabpage_T **tp)
+bool find_win_for_buf(buf_T *buf, win_T **wp, tabpage_T **tp)
 {
-  FOR_ALL_TAB_WINDOWS(*tp, *wp)
-  if ((*wp)->w_buffer == buf)
-    goto win_found;
-  return FAIL;
-win_found:
-  return OK;
+  FOR_ALL_TAB_WINDOWS(*tp, *wp) {
+    if ((*wp)->w_buffer == buf) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /*
@@ -4406,8 +4425,8 @@ linenr_T buf_delsign(
     }
 
     /* When deleted the last sign needs to redraw the windows to remove the
-     * sign column. */
-    if (buf->b_signlist == NULL) {
+     * sign column. Not when curwin is NULL (this means we're exiting). */
+    if (buf->b_signlist != NULL && curwin != NULL) {
         redraw_buf_later(buf, NOT_VALID);
         changed_cline_bef_curs();
     }
@@ -4480,15 +4499,13 @@ void buf_delete_signs(buf_T *buf)
 /*
  * Delete all signs in all buffers.
  */
-void buf_delete_all_signs()
+void buf_delete_all_signs(void)
 {
-    buf_T *buf;     /* buffer we are checking for signs */
-
-    for (buf = firstbuf; buf != NULL; buf = buf->b_next) {
-      if (buf->b_signlist != NULL) {
-        buf_delete_signs(buf);
-      }
+  FOR_ALL_BUFFERS(buf) {
+    if (buf->b_signlist != NULL) {
+      buf_delete_signs(buf);
     }
+  }
 }
 
 /*

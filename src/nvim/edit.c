@@ -10,9 +10,14 @@
  * edit.c: functions for Insert mode
  */
 
+#include <assert.h>
+#include <errno.h>
 #include <string.h>
+#include <inttypes.h>
+#include <stdbool.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/edit.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -939,7 +944,7 @@ doESCkey:
       break;
 
     case K_EVENT:
-      event_process(true);
+      event_process();
       break;
 
     case K_HOME:        /* <Home> */
@@ -1546,7 +1551,7 @@ change_indent (
         new_cursor_col += (*mb_ptr2len)(ptr + new_cursor_col);
       else
         ++new_cursor_col;
-      vcol += lbr_chartabsize(ptr + new_cursor_col, (colnr_T)vcol);
+      vcol += lbr_chartabsize(ptr, ptr + new_cursor_col, (colnr_T)vcol);
     }
     vcol = last_vcol;
 
@@ -1752,7 +1757,7 @@ static int has_compl_option(int dict_opt)
       vim_beep();
       setcursor();
       out_flush();
-      ui_delay(2000L, FALSE);
+      ui_delay(2000L, false);
     }
     return FALSE;
   }
@@ -3146,7 +3151,9 @@ static int ins_compl_prep(int c)
       ins_compl_free();
       compl_started = FALSE;
       compl_matches = 0;
-      msg_clr_cmdline();                /* necessary for "noshowmode" */
+      if (!shortmess(SHM_COMPLETIONMENU)) {
+        msg_clr_cmdline();                // necessary for "noshowmode"
+      }
       ctrl_x_mode = 0;
       compl_enter_selects = FALSE;
       if (edit_submode != NULL) {
@@ -3415,7 +3422,7 @@ static int ins_compl_get_exp(pos_T *ini)
   pos_T       *pos;
   char_u      **matches;
   int save_p_scs;
-  int save_p_ws;
+  bool save_p_ws;
   int save_p_ic;
   int i;
   int num_matches;
@@ -3429,8 +3436,9 @@ static int ins_compl_get_exp(pos_T *ini)
   int set_match_pos;
 
   if (!compl_started) {
-    for (ins_buf = firstbuf; ins_buf != NULL; ins_buf = ins_buf->b_next)
-      ins_buf->b_scanned = 0;
+    FOR_ALL_BUFFERS(buf) {
+      buf->b_scanned = 0;
+    }
     found_all = FALSE;
     ins_buf = curbuf;
     e_cpt = (compl_cont_status & CONT_LOCAL)
@@ -3613,9 +3621,9 @@ static int ins_compl_get_exp(pos_T *ini)
        *	wrapscan for curbuf to avoid missing matches -- Acevedo,Webb */
       save_p_ws = p_ws;
       if (ins_buf != curbuf)
-        p_ws = FALSE;
+        p_ws = false;
       else if (*e_cpt == '.')
-        p_ws = TRUE;
+        p_ws = true;
       for (;; ) {
         int flags = 0;
 
@@ -3790,6 +3798,8 @@ static void ins_compl_delete(void)
    */
   i = compl_col + (compl_cont_status & CONT_ADDING ? compl_length : 0);
   backspace_until_column(i);
+  // TODO: is this sufficient for redrawing?  Redrawing everything causes
+  // flicker, thus we can't do that.
   changed_cline_bef_curs();
 }
 
@@ -4373,7 +4383,9 @@ static int ins_complete(int c)
       if (col == -3) {
         ctrl_x_mode = 0;
         edit_submode = NULL;
-        msg_clr_cmdline();
+        if (!shortmess(SHM_COMPLETIONMENU)) {
+          msg_clr_cmdline();
+        }
         return FAIL;
       }
 
@@ -4592,13 +4604,17 @@ static int ins_complete(int c)
 
   /* Show a message about what (completion) mode we're in. */
   showmode();
-  if (edit_submode_extra != NULL) {
-    if (!p_smd)
-      msg_attr(edit_submode_extra,
-          edit_submode_highl < HLF_COUNT
-          ? hl_attr(edit_submode_highl) : 0);
-  } else
-    msg_clr_cmdline();          /* necessary for "noshowmode" */
+  if (!shortmess(SHM_COMPLETIONMENU)) {
+    if (edit_submode_extra != NULL) {
+      if (!p_smd) {
+        msg_attr(edit_submode_extra,
+                 edit_submode_highl < HLF_COUNT
+                 ? hl_attr(edit_submode_highl) : 0);
+      }
+    } else {
+      msg_clr_cmdline();  // necessary for "noshowmode"
+    }
+  }
 
   /* Show the popup menu, unless we got interrupted. */
   if (!compl_interrupted) {
@@ -5884,9 +5900,11 @@ int oneleft(void)
     width = 1;
     for (;; ) {
       coladvance(v - width);
-      /* getviscol() is slow, skip it when 'showbreak' is empty and
-       * there are no multi-byte characters */
+      /* getviscol() is slow, skip it when 'showbreak' is empty, 
+         'breakindent' is not set and there are no multi-byte 
+         characters */
       if ((*p_sbr == NUL
+           && !curwin->w_p_bri
            && !has_mbyte
            ) || getviscol() < v)
         break;
@@ -6067,8 +6085,8 @@ stuff_inserted (
     /* a trailing "0" is inserted as "<C-V>048", "^" as "<C-V>^" */
     if (last)
       stuffReadbuff((char_u *)(last == '0'
-                               ? IF_EB("\026\060\064\070", CTRL_V_STR "xf0")
-                               : IF_EB("\026^", CTRL_V_STR "^")));
+                               ? "\026\060\064\070"
+                               : "\026^"));
   } while (--count > 0);
 
   if (last)
@@ -6901,8 +6919,9 @@ ins_esc (
         State &= ~REPLACE_FLAG;
 
       (void)start_redo_ins();
-      if (cmdchar == 'r' || cmdchar == 'v')
-        stuffReadbuff(ESC_STR);         /* no ESC in redo buffer */
+      if (cmdchar == 'r' || cmdchar == 'v') {
+        stuffRedoReadbuff(ESC_STR);  // No ESC in redo buffer
+      }
       ++RedrawingDisabled;
       disabled_redraw = TRUE;
       return FALSE;             /* repeat the insert */
@@ -7900,10 +7919,10 @@ static int ins_tab(void)
     getvcol(curwin, &fpos, &vcol, NULL, NULL);
     getvcol(curwin, cursor, &want_vcol, NULL, NULL);
 
-    /* Use as many TABs as possible.  Beware of 'showbreak' and
-     * 'linebreak' adding extra virtual columns. */
+    /* Use as many TABs as possible.  Beware of 'breakindent', 'showbreak'
+       and 'linebreak' adding extra virtual columns. */
     while (vim_iswhite(*ptr)) {
-      i = lbr_chartabsize((char_u *)"\t", vcol);
+      i = lbr_chartabsize(NULL, (char_u *)"\t", vcol);
       if (vcol + i > want_vcol)
         break;
       if (*ptr != TAB) {
@@ -7922,10 +7941,11 @@ static int ins_tab(void)
 
     if (change_col >= 0) {
       int repl_off = 0;
+      char_u *line = ptr;
 
       /* Skip over the spaces we need. */
       while (vcol < want_vcol && *ptr == ' ') {
-        vcol += lbr_chartabsize(ptr, vcol);
+        vcol += lbr_chartabsize(line, ptr, vcol);
         ++ptr;
         ++repl_off;
       }
@@ -8112,6 +8132,7 @@ int ins_copychar(linenr_T lnum)
   int c;
   int temp;
   char_u  *ptr, *prev_ptr;
+  char_u  *line;
 
   if (lnum < 1 || lnum > curbuf->b_ml.ml_line_count) {
     vim_beep();
@@ -8120,12 +8141,12 @@ int ins_copychar(linenr_T lnum)
 
   /* try to advance to the cursor column */
   temp = 0;
-  ptr = ml_get(lnum);
+  line = ptr = ml_get(lnum);
   prev_ptr = ptr;
   validate_virtcol();
   while ((colnr_T)temp < curwin->w_virtcol && *ptr != NUL) {
     prev_ptr = ptr;
-    temp += lbr_chartabsize_adv(&ptr, (colnr_T)temp);
+    temp += lbr_chartabsize_adv(line, &ptr, (colnr_T)temp);
   }
   if ((colnr_T)temp > curwin->w_virtcol)
     ptr = prev_ptr;

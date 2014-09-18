@@ -10,10 +10,15 @@
  * syntax.c: code for syntax highlighting
  */
 
+#include <assert.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
 
 #include "nvim/vim.h"
+#include "nvim/ascii.h"
 #include "nvim/syntax.h"
 #include "nvim/charset.h"
 #include "nvim/eval.h"
@@ -37,6 +42,7 @@
 #include "nvim/regexp.h"
 #include "nvim/screen.h"
 #include "nvim/strings.h"
+#include "nvim/syntax_defs.h"
 #include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/os/os.h"
@@ -978,16 +984,13 @@ static void syn_stack_free_block(synblock_T *block)
  */
 void syn_stack_free_all(synblock_T *block)
 {
-  win_T       *wp;
-
   syn_stack_free_block(block);
 
-
   /* When using "syntax" fold method, must update all folds. */
-  FOR_ALL_WINDOWS(wp)
-  {
-    if (wp->w_s == block && foldmethodIsSyntax(wp))
+  FOR_ALL_WINDOWS(wp) {
+    if (wp->w_s == block && foldmethodIsSyntax(wp)) {
       foldUpdateAll(wp);
+    }
   }
 }
 
@@ -1069,14 +1072,12 @@ static void syn_stack_alloc(void)
  */
 void syn_stack_apply_changes(buf_T *buf)
 {
-  win_T       *wp;
-
   syn_stack_apply_changes_block(&buf->b_s, buf);
 
-  FOR_ALL_WINDOWS(wp)
-  {
-    if ((wp->w_buffer == buf) && (wp->w_s != &buf->b_s))
+  FOR_ALL_WINDOWS(wp) {
+    if ((wp->w_buffer == buf) && (wp->w_s != &buf->b_s)) {
       syn_stack_apply_changes_block(wp->w_s, buf);
+    }
   }
 }
 
@@ -1557,7 +1558,7 @@ syn_finish_line (
 int 
 get_syntax_attr (
     colnr_T col,
-    int *can_spell,
+    bool *can_spell,
     int keep_state                 /* keep state of char at "col" */
 )
 {
@@ -1604,9 +1605,9 @@ get_syntax_attr (
  */
 static int 
 syn_current_attr (
-    int syncing,                            /* When 1: called for syncing */
-    int displaying,                         /* result will be displayed */
-    int *can_spell,                 /* return: do spell checking */
+    int syncing,                           /* When 1: called for syncing */
+    int displaying,                        /* result will be displayed */
+    bool *can_spell,                       /* return: do spell checking */
     int keep_state                         /* keep syntax stack afterwards */
 )
 {
@@ -2069,7 +2070,7 @@ syn_current_attr (
           if (syn_block->b_nospell_cluster_id != 0) {
             sps.id = syn_block->b_nospell_cluster_id;
             if (in_id_list(sip, sip->si_cont_list, &sps, 0))
-              *can_spell = FALSE;
+              *can_spell = false;
           }
         }
       }
@@ -2851,17 +2852,19 @@ static int syn_regexec(regmmatch_T *rmp, linenr_T lnum, colnr_T col, syn_time_T 
   int r;
   proftime_T pt;
 
-  if (syn_time_on)
-    profile_start(&pt);
+  if (syn_time_on) {
+    pt = profile_start();
+  }
 
   rmp->rmm_maxcol = syn_buf->b_p_smc;
   r = vim_regexec_multi(rmp, syn_win, syn_buf, lnum, col, NULL);
 
   if (syn_time_on) {
-    profile_end(&pt);
-    profile_add(&st->total, &pt);
-    if (profile_cmp(&pt, &st->slowest) < 0)
+    pt = profile_end(pt);
+    st->total = profile_add(st->total, pt);
+    if (profile_cmp(pt, st->slowest) < 0) {
       st->slowest = pt;
+    }
     ++st->count;
     if (r > 0)
       ++st->match;
@@ -5527,8 +5530,8 @@ syn_get_id (
     win_T *wp,
     long lnum,
     colnr_T col,
-    int trans,                   /* remove transparency */
-    int *spellp,         /* return: can do spell checking */
+    int trans,                  /* remove transparency */
+    bool *spellp,               /* return: can do spell checking */
     int keep_state              /* keep state of char at "col" */
 )
 {
@@ -5625,8 +5628,8 @@ void ex_syntime(exarg_T *eap)
 
 static void syn_clear_time(syn_time_T *st)
 {
-  profile_zero(&st->total);
-  profile_zero(&st->slowest);
+  st->total = profile_zero();
+  st->slowest = profile_zero();
   st->count = 0;
   st->match = 0;
 }
@@ -5668,7 +5671,7 @@ static int syn_compare_syntime(const void *v1, const void *v2)
   const time_entry_T  *s1 = v1;
   const time_entry_T  *s2 = v2;
 
-  return profile_cmp(&s1->total, &s2->total);
+  return profile_cmp(s1->total, s2->total);
 }
 
 /*
@@ -5676,32 +5679,28 @@ static int syn_compare_syntime(const void *v1, const void *v2)
  */
 static void syntime_report(void)
 {
-  synpat_T    *spp;
-  proftime_T tm;
-  int len;
-  proftime_T total_total;
-  int total_count = 0;
-  garray_T ga;
-  time_entry_T *p;
-
   if (!syntax_present(curwin)) {
     MSG(_(msg_no_items));
     return;
   }
 
+  garray_T ga;
   ga_init(&ga, sizeof(time_entry_T), 50);
-  profile_zero(&total_total);
+
+  proftime_T total_total = profile_zero();
+  int total_count = 0;
+  time_entry_T *p;
   for (int idx = 0; idx < curwin->w_s->b_syn_patterns.ga_len; ++idx) {
-    spp = &(SYN_ITEMS(curwin->w_s)[idx]);
+    synpat_T *spp = &(SYN_ITEMS(curwin->w_s)[idx]);
     if (spp->sp_time.count > 0) {
       p = GA_APPEND_VIA_PTR(time_entry_T, &ga);
       p->total = spp->sp_time.total;
-      profile_add(&total_total, &spp->sp_time.total);
+      total_total = profile_add(total_total, spp->sp_time.total);
       p->count = spp->sp_time.count;
       p->match = spp->sp_time.match;
       total_count += spp->sp_time.count;
       p->slowest = spp->sp_time.slowest;
-      profile_divide(&spp->sp_time.total, spp->sp_time.count, &tm);
+      proftime_T tm = profile_divide(spp->sp_time.total, spp->sp_time.count);
       p->average = tm;
       p->id = spp->sp_syn.id;
       p->pattern = spp->sp_pattern;
@@ -5716,10 +5715,9 @@ static void syntime_report(void)
           "  TOTAL      COUNT  MATCH   SLOWEST     AVERAGE   NAME               PATTERN"));
   MSG_PUTS("\n");
   for (int idx = 0; idx < ga.ga_len && !got_int; ++idx) {
-    spp = &(SYN_ITEMS(curwin->w_s)[idx]);
     p = ((time_entry_T *)ga.ga_data) + idx;
 
-    MSG_PUTS(profile_msg(&p->total));
+    MSG_PUTS(profile_msg(p->total));
     MSG_PUTS(" ");     /* make sure there is always a separating space */
     msg_advance(13);
     msg_outnum(p->count);
@@ -5728,16 +5726,17 @@ static void syntime_report(void)
     msg_outnum(p->match);
     MSG_PUTS(" ");
     msg_advance(26);
-    MSG_PUTS(profile_msg(&p->slowest));
+    MSG_PUTS(profile_msg(p->slowest));
     MSG_PUTS(" ");
     msg_advance(38);
-    MSG_PUTS(profile_msg(&p->average));
+    MSG_PUTS(profile_msg(p->average));
     MSG_PUTS(" ");
     msg_advance(50);
     msg_outtrans(HL_TABLE()[p->id - 1].sg_name);
     MSG_PUTS(" ");
 
     msg_advance(69);
+    int len;
     if (Columns < 80)
       len = 20;       /* will wrap anyway */
     else
@@ -5750,7 +5749,7 @@ static void syntime_report(void)
   ga_clear(&ga);
   if (!got_int) {
     MSG_PUTS("\n");
-    MSG_PUTS(profile_msg(&total_total));
+    MSG_PUTS(profile_msg(total_total));
     msg_advance(13);
     msg_outnum(total_count);
     MSG_PUTS("\n");
@@ -6683,6 +6682,8 @@ static int hl_has_settings(int idx, int check_link)
 {
   return HL_TABLE()[idx].sg_term_attr != 0
          || HL_TABLE()[idx].sg_cterm_attr != 0
+         || HL_TABLE()[idx].sg_cterm_fg != 0
+         || HL_TABLE()[idx].sg_cterm_bg != 0
          || (check_link && (HL_TABLE()[idx].sg_set & SG_LINK));
 }
 
@@ -7604,7 +7605,7 @@ static void highlight_list_two(int cnt, int attr)
   msg_puts_attr((char_u *)&("N \bI \b!  \b"[cnt / 11]), attr);
   msg_clr_eos();
   out_flush();
-  ui_delay(cnt == 99 ? 40L : (long)cnt * 50L, FALSE);
+  ui_delay(cnt == 99 ? 40L : (long)cnt * 50L, false);
 }
 
 

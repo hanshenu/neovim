@@ -1,9 +1,13 @@
 #ifndef NVIM_BUFFER_DEFS_H
 #define NVIM_BUFFER_DEFS_H
 
+#include <stdbool.h>
+// for FILE
+#include <stdio.h>
+
 // for garray_T
 #include "nvim/garray.h"
-// for pos_T and lpos_T
+// for pos_T, lpos_T and linenr_T
 #include "nvim/pos.h"
 // for the number window-local and buffer-local options
 #include "nvim/option_defs.h"
@@ -15,6 +19,8 @@
 #include "nvim/hashtab.h"
 // for dict_T
 #include "nvim/eval_defs.h"
+// for proftime_T
+#include "nvim/profile.h"
 
 /*
  * Flags for w_valid.
@@ -130,6 +136,10 @@ struct buffheader {
 typedef struct {
   int wo_arab;
 # define w_p_arab w_onebuf_opt.wo_arab  /* 'arabic' */
+  int wo_bri;
+# define w_p_bri w_onebuf_opt.wo_bri	/* 'breakindent' */
+  char_u *wo_briopt;
+# define w_p_briopt w_onebuf_opt.wo_briopt /* 'breakindentopt' */
   int wo_diff;
 # define w_p_diff w_onebuf_opt.wo_diff  /* 'diff' */
   long wo_fdc;
@@ -245,6 +255,7 @@ struct wininfo_S {
 typedef struct arglist {
   garray_T al_ga;               /* growarray with the array of file names */
   int al_refcount;              /* number of windows using this arglist */
+  int id;                       ///< id of this arglist
 } alist_T;
 
 /*
@@ -314,7 +325,7 @@ typedef struct {
 # ifdef USE_ICONV
   iconv_t vc_fd;                /* for CONV_ICONV */
 # endif
-  int vc_fail;                  /* fail for invalid char, don't use '?' */
+  bool vc_fail;                 /* fail for invalid char, don't use '?' */
 } vimconv_T;
 
 /*
@@ -432,7 +443,7 @@ typedef struct {
 
   /* for spell checking */
   garray_T b_langp;             /* list of pointers to slang_T, see spell.c */
-  char_u b_spell_ismw[256];       /* flags: is midword char */
+  bool b_spell_ismw[256];       /* flags: is midword char */
   char_u      *b_spell_ismw_mb;   /* multi-byte midword chars */
   char_u      *b_p_spc;         /* 'spellcapcheck' */
   regprog_T   *b_cap_prog;      /* program for 'spellcapcheck' */
@@ -502,7 +513,7 @@ struct file_buffer {
 
   long b_mtime;                 /* last change time of original file */
   long b_mtime_read;            /* last change time when reading */
-  off_t b_orig_size;            /* size of original file in bytes */
+  uint64_t b_orig_size;         /* size of original file in bytes */
   int b_orig_mode;              /* mode of original file */
 
   pos_T b_namedm[NMARKS];         /* current named marks (mark.c) */
@@ -645,9 +656,9 @@ struct file_buffer {
   long b_p_sw;                  /* 'shiftwidth' */
   int b_p_si;                   /* 'smartindent' */
   long b_p_sts;                 /* 'softtabstop' */
-  long b_p_sts_nopaste;          /* b_p_sts saved for paste mode */
+  long b_p_sts_nopaste;         /* b_p_sts saved for paste mode */
   char_u      *b_p_sua;         /* 'suffixesadd' */
-  int b_p_swf;                  /* 'swapfile' */
+  bool b_p_swf;                 /* 'swapfile' */
   long b_p_smc;                 /* 'synmaxcol' */
   char_u      *b_p_syn;         /* 'syntax' */
   long b_p_ts;                  /* 'tabstop' */
@@ -671,6 +682,7 @@ struct file_buffer {
   char_u      *b_p_tsr;         /* 'thesaurus' local value */
   long b_p_ul;                  /* 'undolevels' local value */
   int b_p_udf;                  /* 'undofile' */
+  char_u      *b_p_lw;          // 'lispwords' local value
 
   /* end of buffer options */
 
@@ -738,7 +750,7 @@ struct file_buffer {
    */
   int b_help;                   /* TRUE for help file buffer (when set b_p_bt
                                    is "help") */
-  int b_spell;                  /* TRUE for a spell file buffer, most fields
+  bool b_spell;                 /* True for a spell file buffer, most fields
                                    are not used!  Use the B_SPELL macro to
                                    access b_spell without #ifdef. */
 
@@ -869,6 +881,28 @@ typedef struct {
   proftime_T tm;        /* for a time limit */
 } match_T;
 
+/// number of positions supported by matchaddpos()
+#define MAXPOSMATCH 8
+
+/// Same as lpos_T, but with additional field len.
+typedef struct
+{
+    linenr_T    lnum;	///< line number
+    colnr_T     col;	///< column number
+    int         len;	///< length: 0 - to the end of line
+} llpos_T;
+
+/// posmatch_T provides an array for storing match items for matchaddpos()
+/// function.
+typedef struct posmatch posmatch_T;
+struct posmatch
+{
+    llpos_T     pos[MAXPOSMATCH];	///< array of positions
+    int         cur;			///< internal position counter 
+    linenr_T    toplnum;		///< top buffer line
+    linenr_T    botlnum;		///< bottom buffer line
+};
+
 /*
  * matchitem_T provides a linked list for storing match items for ":match" and
  * the match functions.
@@ -881,6 +915,7 @@ struct matchitem {
   char_u      *pattern;     /* pattern to highlight */
   int hlg_id;               /* highlight group ID */
   regmmatch_T match;        /* regexp program for pattern */
+  posmatch_T pos;           // position matches
   match_T hl;               /* struct for doing the actual highlighting */
 };
 
@@ -1062,6 +1097,9 @@ struct window_S {
   long_u w_p_fde_flags;             /* flags for 'foldexpr' */
   long_u w_p_fdt_flags;             /* flags for 'foldtext' */
   int         *w_p_cc_cols;         /* array of columns to highlight or NULL */
+  int         w_p_brimin;           /* minimum width for breakindent */
+  int         w_p_brishift;         /* additional shift for breakindent */
+  bool        w_p_brisbr;           /* sbr in 'briopt' */
 
   /* transform a pointer to a "onebuf" option into a "allbuf" option */
 #define GLOBAL_WO(p)    ((char *)p + sizeof(winopt_T))

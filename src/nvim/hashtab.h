@@ -1,8 +1,9 @@
 #ifndef NVIM_HASHTAB_H
 #define NVIM_HASHTAB_H
 
-#include <stdbool.h>
-#include "nvim/vim.h"
+#include <stddef.h>
+
+#include "nvim/types.h"
 
 /// Type for hash number (hash calculation result).
 typedef size_t hash_T;

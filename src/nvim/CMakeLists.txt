@@ -7,6 +7,10 @@ set(MSGPACK_RPC_HEADER ${PROJECT_SOURCE_DIR}/src/nvim/os/msgpack_rpc.h)
 set(MSGPACK_DISPATCH ${GENERATED_DIR}/msgpack_dispatch.c)
 set(HEADER_GENERATOR ${PROJECT_SOURCE_DIR}/scripts/gendeclarations.lua)
 set(GENERATED_INCLUDES_DIR ${PROJECT_BINARY_DIR}/include)
+set(GENERATED_EX_CMDS_ENUM ${GENERATED_INCLUDES_DIR}/ex_cmds_enum.generated.h)
+set(GENERATED_EX_CMDS_DEFS ${GENERATED_DIR}/ex_cmds_defs.generated.h)
+set(EX_CMDS_GENERATOR ${PROJECT_SOURCE_DIR}/scripts/genex_cmds.lua)
+set(EX_CMDS_DEFS_FILE ${PROJECT_SOURCE_DIR}/src/nvim/ex_cmds.lua)
 
 include_directories(${GENERATED_DIR})
 include_directories(${GENERATED_INCLUDES_DIR})
@@ -20,7 +24,8 @@ file(MAKE_DIRECTORY ${GENERATED_INCLUDES_DIR}/os)
 file(MAKE_DIRECTORY ${GENERATED_INCLUDES_DIR}/api)
 file(MAKE_DIRECTORY ${GENERATED_INCLUDES_DIR}/api/private)
 
-file( GLOB NEOVIM_SOURCES *.c )
+file(GLOB NEOVIM_SOURCES *.c os/*.c api/*.c api/private/*.c)
+file(GLOB_RECURSE NEOVIM_HEADERS *.h)
 
 foreach(sfile ${NEOVIM_SOURCES})
   get_filename_component(f ${sfile} NAME)
@@ -31,10 +36,6 @@ endforeach()
 
 list(REMOVE_ITEM NEOVIM_SOURCES ${to_remove})
 
-file( GLOB OS_SOURCES os/*.c )
-file( GLOB API_SOURCES api/*.c )
-file( GLOB API_PRIV_SOURCES api/private/*.c )
-
 set(CONV_SRCS
   api.c
   arabic.c
@@ -44,7 +45,9 @@ set(CONV_SRCS
   log.c
   map.c
   memory.c
+  misc2.c
   map.c
+  profile.c
   os/env.c
   os/event.c
   os/job.c
@@ -52,9 +55,11 @@ set(CONV_SRCS
   os/rstream.c
   os/signal.c
   os/users.c
+  os/provider.c
   os/uv_helpers.c
   os/wstream.c
   os/msgpack_rpc.c
+  tempfile.c
   api/buffer.c
   api/private/helpers.c
   api/private/handle.c
@@ -92,10 +97,7 @@ endforeach()
 set(gen_cflags "${gen_cflags} ${CMAKE_C_FLAGS}")
 
 foreach(sfile ${NEOVIM_SOURCES}
-              "${PROJECT_SOURCE_DIR}/src/nvim/regexp_nfa.c"
-              ${OS_SOURCES}
-              ${API_SOURCES}
-              ${API_PRIV_SOURCES})
+              "${PROJECT_SOURCE_DIR}/src/nvim/regexp_nfa.c")
   get_filename_component(full_d ${sfile} PATH)
   file(RELATIVE_PATH d "${PROJECT_SOURCE_DIR}/src/nvim" "${full_d}")
   get_filename_component(f ${sfile} NAME)
@@ -126,10 +128,20 @@ add_custom_command(OUTPUT ${MSGPACK_DISPATCH}
     ${API_HEADERS}
     ${MSGPACK_RPC_HEADER}
     ${DISPATCH_GENERATOR}
-    )
+)
 
-list(APPEND NEOVIM_SOURCES "${PROJECT_BINARY_DIR}/config/auto/pathdef.c")
-list(APPEND NEOVIM_SOURCES "${MSGPACK_DISPATCH}")
+list(APPEND NEOVIM_GENERATED_SOURCES
+  "${PROJECT_BINARY_DIR}/config/auto/pathdef.c"
+  "${MSGPACK_DISPATCH}"
+  "${GENERATED_EX_CMDS_ENUM}"
+  "${GENERATED_EX_CMDS_DEFS}"
+)
+
+add_custom_command(OUTPUT ${GENERATED_EX_CMDS_ENUM} ${GENERATED_EX_CMDS_DEFS}
+  COMMAND ${LUA_PRG} ${EX_CMDS_GENERATOR}
+      ${PROJECT_SOURCE_DIR}/src/nvim ${GENERATED_INCLUDES_DIR} ${GENERATED_DIR}
+  DEPENDS ${EX_CMDS_GENERATOR} ${EX_CMDS_DEFS_FILE}
+)
 
 # Our dependencies come first.
 
@@ -146,7 +158,7 @@ else()
     list(APPEND NVIM_LINK_LIBRARIES tinfo)
   else()
     find_package(Curses REQUIRED)
-    list(APPEND NVIM_LINK_LIBRARIES ${CURSES_LIBRARIES})
+    list(APPEND NVIM_LINK_LIBRARIES ${CURSES_LIBRARY})
   endif()
 endif()
 
@@ -160,13 +172,15 @@ list(APPEND NVIM_LINK_LIBRARIES
 
 if(NOT DEFINED ENV{SKIP_EXEC})
   add_executable(nvim ${NEOVIM_GENERATED_SOURCES} ${NEOVIM_SOURCES}
-    ${OS_SOURCES} ${API_SOURCES} ${API_PRIV_SOURCES})
+    ${NEOVIM_HEADERS})
   target_link_libraries(nvim ${NVIM_LINK_LIBRARIES})
   install(TARGETS nvim RUNTIME DESTINATION bin)
 endif()
 
 if(NOT DEFINED ENV{SKIP_UNITTEST})
   add_library(nvim-test MODULE EXCLUDE_FROM_ALL ${NEOVIM_GENERATED_SOURCES}
-    ${NEOVIM_SOURCES} ${OS_SOURCES} ${API_SOURCES} ${API_PRIV_SOURCES})
+    ${NEOVIM_SOURCES} ${NEOVIM_HEADERS})
   target_link_libraries(nvim-test ${NVIM_LINK_LIBRARIES})
 endif()
+
+add_subdirectory(po)
