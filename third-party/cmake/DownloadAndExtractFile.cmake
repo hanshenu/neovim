@@ -10,12 +10,24 @@ if(NOT DEFINED DOWNLOAD_DIR)
   message(FATAL_ERROR "DOWNLOAD_DIR must be defined.")
 endif()
 
-if(NOT DEFINED EXPECTED_MD5)
-  message(FATAL_ERROR "EXPECTED_MD5 must be defined.")
+if(NOT DEFINED EXPECTED_SHA1)
+  message(FATAL_ERROR "EXPECTED_SHA1 must be defined.")
 endif()
 
 if(NOT DEFINED TARGET)
   message(FATAL_ERROR "TARGET must be defined.")
+endif()
+
+set(SRC_DIR ${PREFIX}/src/${TARGET})
+
+# Check whether the source has been downloaded. If true, skip it.
+# Useful for external downloads like homebrew.
+if(EXISTS "${SRC_DIR}" AND IS_DIRECTORY "${SRC_DIR}")
+  file(GLOB EXISTED_FILES "${SRC_DIR}/*")
+  if(EXISTED_FILES)
+    message(STATUS "${SRC_DIR} is found and not empty, skipping download and extraction. ")
+    return()
+  endif()
 endif()
 
 # Taken from ExternalProject_Add.  Let's hope we can drop this one day when
@@ -48,7 +60,7 @@ message(STATUS "downloading...
 
 file(DOWNLOAD ${URL} ${file}
   ${timeout_args}
-  EXPECTED_MD5 ${EXPECTED_MD5}
+  ${hash_args}
   STATUS status
   LOG log)
 
@@ -63,9 +75,34 @@ if(NOT status_code EQUAL 0)
 ")
 endif()
 
-message(STATUS "downloading... done")
+set(NULL_SHA1 "0000000000000000000000000000000000000000")
 
-set(SRC_DIR ${PREFIX}/src/${TARGET})
+# Allow users to use "SKIP" or "skip" as the sha1 to skip checking the hash.
+# You can still use the all zeros hash too.
+if((EXPECTED_SHA1 STREQUAL "SKIP") OR (EXPECTED_SHA1 STREQUAL "skip"))
+  set(EXPECTED_SHA1 ${NULL_SHA1})
+endif()
+
+# We could avoid computing the SHA1 entirely if a NULL_SHA1 was given,
+# but we want to warn users of an empty file.
+file(SHA1 ${file} ACTUAL_SHA1)
+if(ACTUAL_SHA1 STREQUAL "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+  # File was empty.  It's likely due to lack of SSL support.
+  message(FATAL_ERROR
+    "Failed to download ${URL}.  The file is empty and likely means CMake "
+    "was built without SSL support.  Please use a version of CMake with "
+    "proper SSL support.  See "
+    "https://github.com/neovim/neovim/wiki/Building-Neovim#build-prerequisites "
+    "for more information.")
+elseif((NOT EXPECTED_SHA1 STREQUAL NULL_SHA1) AND
+       (NOT EXPECTED_SHA1 STREQUAL ACTUAL_SHA1))
+  # Wasn't a NULL SHA1 and we didn't match, so we fail.
+  message(FATAL_ERROR
+    "Failed to download ${URL}.  Expected a SHA1 of "
+    "${EXPECTED_SHA1} but got ${ACTUAL_SHA1} instead.")
+endif()
+
+message(STATUS "downloading... done")
 
 # Slurped from a generated extract-TARGET.cmake file.
 message(STATUS "extracting...
@@ -120,4 +157,3 @@ message(STATUS "extracting... [clean up]")
 file(REMOVE_RECURSE "${ut_dir}")
 
 message(STATUS "extracting... done")
-

@@ -10,6 +10,7 @@
  * fileio.c: read from and write to a file
  */
 
+#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <string.h>
@@ -28,8 +29,10 @@
 #include "nvim/ex_docmd.h"
 #include "nvim/ex_eval.h"
 #include "nvim/fold.h"
+#include "nvim/func_attr.h"
 #include "nvim/getchar.h"
 #include "nvim/hashtab.h"
+#include "nvim/iconv.h"
 #include "nvim/mbyte.h"
 #include "nvim/memfile.h"
 #include "nvim/memline.h"
@@ -52,10 +55,11 @@
 #include "nvim/tempfile.h"
 #include "nvim/term.h"
 #include "nvim/types.h"
-#include "nvim/ui.h"
 #include "nvim/undo.h"
 #include "nvim/window.h"
 #include "nvim/os/os.h"
+#include "nvim/os/time.h"
+#include "nvim/os/input.h"
 
 #if defined(HAVE_UTIME) && defined(HAVE_UTIME_H)
 # include <utime.h>             /* for struct utimbuf */
@@ -71,25 +75,25 @@
  * The result is an array of Autopat lists, which point to AutoCmd lists:
  *
  * first_autopat[0] --> Autopat.next  -->  Autopat.next -->  NULL
- *			Autopat.cmds	   Autopat.cmds
- *			    |			 |
- *			    V			 V
- *			AutoCmd.next	   AutoCmd.next
- *			    |			 |
- *			    V			 V
- *			AutoCmd.next		NULL
- *			    |
- *			    V
- *			   NULL
+ *                      Autopat.cmds       Autopat.cmds
+ *                          |                    |
+ *                          V                    V
+ *                      AutoCmd.next       AutoCmd.next
+ *                          |                    |
+ *                          V                    V
+ *                      AutoCmd.next            NULL
+ *                          |
+ *                          V
+ *                         NULL
  *
  * first_autopat[1] --> Autopat.next  -->  NULL
- *			Autopat.cmds
- *			    |
- *			    V
- *			AutoCmd.next
- *			    |
- *			    V
- *			   NULL
+ *                      Autopat.cmds
+ *                          |
+ *                          V
+ *                      AutoCmd.next
+ *                          |
+ *                          V
+ *                         NULL
  *   etc.
  *
  *   The order of AutoCmds is important, this is the order in which they were
@@ -531,63 +535,64 @@ readfile (
       curbuf->b_p_ro = TRUE;            /* must use "w!" now */
     } else
 #endif
-    if (newfile) {
-      if (perm < 0
+    if (!newfile) {
+      return FAIL;
+    }
+    if (perm < 0
 #ifdef ENOENT
-          && errno == ENOENT
+        && errno == ENOENT
 #endif
-          ) {
-        /*
-         * Set the 'new-file' flag, so that when the file has
-         * been created by someone else, a ":w" will complain.
-         */
-        curbuf->b_flags |= BF_NEW;
+        ) {
+      /*
+       * Set the 'new-file' flag, so that when the file has
+       * been created by someone else, a ":w" will complain.
+       */
+      curbuf->b_flags |= BF_NEW;
 
-        /* Create a swap file now, so that other Vims are warned
-         * that we are editing this file.  Don't do this for a
-         * "nofile" or "nowrite" buffer type. */
-        if (!bt_dontwrite(curbuf)) {
-          check_need_swap(newfile);
-          /* SwapExists autocommand may mess things up */
-          if (curbuf != old_curbuf
-              || (using_b_ffname
-                  && (old_b_ffname != curbuf->b_ffname))
-              || (using_b_fname
-                  && (old_b_fname != curbuf->b_fname))) {
-            EMSG(_(e_auchangedbuf));
-            return FAIL;
-          }
-        }
-        if (dir_of_file_exists(fname))
-          filemess(curbuf, sfname, (char_u *)_("[New File]"), 0);
-        else
-          filemess(curbuf, sfname,
-              (char_u *)_("[New DIRECTORY]"), 0);
-        /* Even though this is a new file, it might have been
-         * edited before and deleted.  Get the old marks. */
-        check_marks_read();
-        /* Set forced 'fileencoding'.  */
-        if (eap != NULL)
-          set_forced_fenc(eap);
-        apply_autocmds_exarg(EVENT_BUFNEWFILE, sfname, sfname,
-            FALSE, curbuf, eap);
-        /* remember the current fileformat */
-        save_file_ff(curbuf);
-
-        if (aborting())               /* autocmds may abort script processing */
+      /* Create a swap file now, so that other Vims are warned
+       * that we are editing this file.  Don't do this for a
+       * "nofile" or "nowrite" buffer type. */
+      if (!bt_dontwrite(curbuf)) {
+        check_need_swap(newfile);
+        /* SwapExists autocommand may mess things up */
+        if (curbuf != old_curbuf
+            || (using_b_ffname
+                && (old_b_ffname != curbuf->b_ffname))
+            || (using_b_fname
+                && (old_b_fname != curbuf->b_fname))) {
+          EMSG(_(e_auchangedbuf));
           return FAIL;
-        return OK;                  /* a new file is not an error */
-      } else {
-        filemess(curbuf, sfname, (char_u *)(
+        }
+      }
+      if (dir_of_file_exists(fname))
+        filemess(curbuf, sfname, (char_u *)_("[New File]"), 0);
+      else
+        filemess(curbuf, sfname,
+            (char_u *)_("[New DIRECTORY]"), 0);
+      /* Even though this is a new file, it might have been
+       * edited before and deleted.  Get the old marks. */
+      check_marks_read();
+      /* Set forced 'fileencoding'.  */
+      if (eap != NULL)
+        set_forced_fenc(eap);
+      apply_autocmds_exarg(EVENT_BUFNEWFILE, sfname, sfname,
+          FALSE, curbuf, eap);
+      /* remember the current fileformat */
+      save_file_ff(curbuf);
+
+      if (aborting())               /* autocmds may abort script processing */
+        return FAIL;
+      return OK;                  /* a new file is not an error */
+    } else {
+      filemess(curbuf, sfname, (char_u *)(
 # ifdef EFBIG
-              (errno == EFBIG) ? _("[File too big]") :
+            (errno == EFBIG) ? _("[File too big]") :
 # endif
 # ifdef EOVERFLOW
-              (errno == EOVERFLOW) ? _("[File too big]") :
+            (errno == EOVERFLOW) ? _("[File too big]") :
 # endif
-              _("[Permission Denied]")), 0);
-        curbuf->b_p_ro = TRUE;                  /* must use "w!" now */
-      }
+            _("[Permission Denied]")), 0);
+      curbuf->b_p_ro = TRUE;                  /* must use "w!" now */
     }
 
     return FAIL;
@@ -633,14 +638,12 @@ readfile (
 #endif
   }
 
-#if defined(HAS_SWAP_EXISTS_ACTION)
   /* If "Quit" selected at ATTENTION dialog, don't load the file */
   if (swap_exists_action == SEA_QUIT) {
     if (!read_buffer && !read_stdin)
       close(fd);
     return FAIL;
   }
-#endif
 
   ++no_wait_return;         /* don't wait for return yet */
 
@@ -1703,7 +1706,7 @@ rewind_retry:
       }
     }
     linerest = (long)(ptr - line_start);
-    ui_breakcheck();
+    os_breakcheck();
   }
 
 failed:
@@ -1750,7 +1753,9 @@ failed:
 # ifdef USE_ICONV
   if (iconv_fd != (iconv_t)-1) {
     iconv_close(iconv_fd);
+#  ifndef __clang_analyzer__
     iconv_fd = (iconv_t)-1;
+#  endif
   }
 # endif
 
@@ -1808,7 +1813,6 @@ failed:
      * Switch on raw mode now and clear the screen.
      */
     if (read_stdin) {
-      settmode(TMODE_RAW);              /* set to raw mode */
       starttermcap();
       screenclear();
     }
@@ -2104,6 +2108,7 @@ void set_forced_fenc(exarg_T *eap)
  * When *pp is not set to NULL, the result is in allocated memory.
  */
 static char_u *next_fenc(char_u **pp)
+  FUNC_ATTR_NONNULL_ALL FUNC_ATTR_NONNULL_RET
 {
   char_u      *p;
   char_u      *r;
@@ -2122,10 +2127,6 @@ static char_u *next_fenc(char_u **pp)
     p = enc_canonize(r);
     free(r);
     r = p;
-  }
-  if (r == NULL) {      /* out of memory */
-    r = (char_u *)"";
-    *pp = NULL;
   }
   return r;
 }
@@ -2194,7 +2195,7 @@ static void check_marks_read(void)
 
   /* Always set b_marks_read; needed when 'viminfo' is changed to include
    * the ' parameter after opening a buffer. */
-  curbuf->b_marks_read = TRUE;
+  curbuf->b_marks_read = true;
 }
 
 #ifdef UNIX
@@ -2309,6 +2310,7 @@ buf_write (
 #endif
   int write_undo_file = FALSE;
   context_sha256_T sha_ctx;
+  unsigned int bkc = get_bkc_value(buf);
 
   if (fname == NULL || *fname == NUL)   /* safety check */
     return FAIL;
@@ -2382,9 +2384,6 @@ buf_write (
     overwriting = TRUE;
   else
     overwriting = FALSE;
-
-  if (exiting)
-    settmode(TMODE_COOK);           /* when exiting allow typeahead now */
 
   ++no_wait_return;                 /* don't wait for return yet */
 
@@ -2687,7 +2686,7 @@ buf_write (
   got_int = FALSE;
 
   /* Mark the buffer as 'being saved' to prevent changed buffer warnings */
-  buf->b_saving = TRUE;
+  buf->b_saving = true;
 
   /*
    * If we are not appending or filtering, the file exists, and the
@@ -2700,9 +2699,9 @@ buf_write (
   if (!(append && *p_pm == NUL) && !filtering && perm >= 0 && dobackup) {
     FileInfo file_info;
 
-    if ((bkc_flags & BKC_YES) || append) {       /* "yes" */
+    if ((bkc & BKC_YES) || append) {       /* "yes" */
       backup_copy = TRUE;
-    } else if ((bkc_flags & BKC_AUTO)) {          /* "auto" */
+    } else if ((bkc & BKC_AUTO)) {          /* "auto" */
       int i;
 
 # ifdef UNIX
@@ -2757,19 +2756,19 @@ buf_write (
     /*
      * Break symlinks and/or hardlinks if we've been asked to.
      */
-    if ((bkc_flags & BKC_BREAKSYMLINK) || (bkc_flags & BKC_BREAKHARDLINK)) {
+    if ((bkc & BKC_BREAKSYMLINK) || (bkc & BKC_BREAKHARDLINK)) {
 # ifdef UNIX
       bool file_info_link_ok = os_fileinfo_link((char *)fname, &file_info);
 
       /* Symlinks. */
-      if ((bkc_flags & BKC_BREAKSYMLINK)
+      if ((bkc & BKC_BREAKSYMLINK)
           && file_info_link_ok
           && !os_fileinfo_id_equal(&file_info, &file_info_old)) {
         backup_copy = FALSE;
       }
 
       /* Hardlinks. */
-      if ((bkc_flags & BKC_BREAKHARDLINK)
+      if ((bkc & BKC_BREAKHARDLINK)
           && os_fileinfo_hardlinks(&file_info_old) > 1
           && (!file_info_link_ok
               || os_fileinfo_id_equal(&file_info, &file_info_old))) {
@@ -2838,27 +2837,25 @@ buf_write (
            * Check if backup file already exists.
            */
           if (os_fileinfo((char *)backup, &file_info_new)) {
-            /*
-             * Check if backup file is same as original file.
-             * May happen when modname() gave the same file back (e.g. silly
-             * link). If we don't check here, we either ruin the file when
-             * copying or erase it after writing.
-             */
             if (os_fileinfo_id_equal(&file_info_new, &file_info_old)) {
+              /*
+               * Backup file is same as original file.
+               * May happen when modname() gave the same file back (e.g. silly
+               * link). If we don't check here, we either ruin the file when
+               * copying or erase it after writing.
+               */
               free(backup);
               backup = NULL;                    /* no backup file to delete */
-            }
-
-            /*
-             * If we are not going to keep the backup file, don't
-             * delete an existing one, try to use another name.
-             * Change one character, just before the extension.
-             */
-            if (!p_bk) {
-              wp = backup + STRLEN(backup) - 1
-                   - STRLEN(backup_ext);
-              if (wp < backup)                  /* empty file name ??? */
+            } else if (!p_bk) {
+              /*
+               * We are not going to keep the backup file, so don't
+               * delete an existing one, and try to use another name instead.
+               * Change one character, just before the extension.
+               */
+              wp = backup + STRLEN(backup) - 1 - STRLEN(backup_ext);
+              if (wp < backup) {                /* empty file name ??? */
                 wp = backup;
+              }
               *wp = 'z';
               while (*wp > 'a'
                      && os_fileinfo((char *)backup, &file_info_new)) {
@@ -2924,7 +2921,7 @@ buf_write (
                     "E506: Can't write to backup file (add ! to override)");
                 break;
               }
-              ui_breakcheck();
+              os_breakcheck();
               if (got_int) {
                 errmsg = (char_u *)_(e_interr);
                 break;
@@ -3374,7 +3371,7 @@ restore_backup:
       s = buffer;
       len = 0;
 
-      ui_breakcheck();
+      os_breakcheck();
       if (got_int) {
         end = 0;                        /* Interrupted, break loop */
         break;
@@ -3583,6 +3580,12 @@ restore_backup:
       && (overwriting || vim_strchr(p_cpo, CPO_PLUS) != NULL)
       ) {
     unchanged(buf, TRUE);
+    /* buf->b_changedtick is always incremented in unchanged() but that
+     * should not trigger a TextChanged event. */
+    if (last_changedtick + 1 == buf->b_changedtick
+        && last_changedtick_buf == buf) {
+      last_changedtick = buf->b_changedtick;
+    }
     u_unchanged(buf);
     u_update_save_nr(buf);
   }
@@ -3662,7 +3665,7 @@ fail:
 nofail:
 
   /* Done saving, we accept changed buffer warnings again */
-  buf->b_saving = FALSE;
+  buf->b_saving = false;
 
   free(backup);
   if (buffer != smallbuf)
@@ -4919,54 +4922,51 @@ buf_check_timestamp (
 
   if (mesg != NULL) {
     path = home_replace_save(buf, buf->b_fname);
-    if (path != NULL) {
-      if (!helpmesg)
-        mesg2 = "";
-      tbuf = xmalloc(STRLEN(path) + STRLEN(mesg) + STRLEN(mesg2) + 2);
-      sprintf((char *)tbuf, mesg, path);
-      /* Set warningmsg here, before the unimportant and output-specific
-       * mesg2 has been appended. */
-      set_vim_var_string(VV_WARNINGMSG, tbuf, -1);
-      if (can_reload) {
-        if (*mesg2 != NUL) {
-          STRCAT(tbuf, "\n");
-          STRCAT(tbuf, mesg2);
-        }
-        if (do_dialog(VIM_WARNING, (char_u *)_("Warning"), tbuf,
-                (char_u *)_("&OK\n&Load File"), 1, NULL, TRUE) == 2)
-          reload = TRUE;
-      } else if (State > NORMAL_BUSY || (State & CMDLINE) ||
-                 already_warned) {
-        if (*mesg2 != NUL) {
-          STRCAT(tbuf, "; ");
-          STRCAT(tbuf, mesg2);
-        }
-        EMSG(tbuf);
-        retval = 2;
-      } else {
-        if (!autocmd_busy) {
-          msg_start();
-          msg_puts_attr(tbuf, hl_attr(HLF_E) + MSG_HIST);
-          if (*mesg2 != NUL)
-            msg_puts_attr((char_u *)mesg2,
-                hl_attr(HLF_W) + MSG_HIST);
-          msg_clr_eos();
-          (void)msg_end();
-          if (emsg_silent == 0) {
-            out_flush();
-            /* give the user some time to think about it */
-            ui_delay(1000L, true);
-
-            /* don't redraw and erase the message */
-            redraw_cmdline = FALSE;
-          }
-        }
-        already_warned = TRUE;
+    if (!helpmesg)
+      mesg2 = "";
+    tbuf = xmalloc(STRLEN(path) + STRLEN(mesg) + STRLEN(mesg2) + 2);
+    sprintf((char *)tbuf, mesg, path);
+    /* Set warningmsg here, before the unimportant and output-specific
+     * mesg2 has been appended. */
+    set_vim_var_string(VV_WARNINGMSG, tbuf, -1);
+    if (can_reload) {
+      if (*mesg2 != NUL) {
+        STRCAT(tbuf, "\n");
+        STRCAT(tbuf, mesg2);
       }
+      if (do_dialog(VIM_WARNING, (char_u *)_("Warning"), tbuf,
+                    (char_u *)_("&OK\n&Load File"), 1, NULL, TRUE) == 2)
+        reload = TRUE;
+    } else if (State > NORMAL_BUSY || (State & CMDLINE) || already_warned) {
+      if (*mesg2 != NUL) {
+        STRCAT(tbuf, "; ");
+        STRCAT(tbuf, mesg2);
+      }
+      EMSG(tbuf);
+      retval = 2;
+    } else {
+      if (!autocmd_busy) {
+        msg_start();
+        msg_puts_attr(tbuf, hl_attr(HLF_E) + MSG_HIST);
+        if (*mesg2 != NUL)
+          msg_puts_attr((char_u *)mesg2,
+                        hl_attr(HLF_W) + MSG_HIST);
+        msg_clr_eos();
+        (void)msg_end();
+        if (emsg_silent == 0) {
+          out_flush();
+          /* give the user some time to think about it */
+          os_delay(1000L, true);
 
-      free(path);
-      free(tbuf);
+          /* don't redraw and erase the message */
+          redraw_cmdline = FALSE;
+        }
+      }
+      already_warned = TRUE;
     }
+
+    free(path);
+    free(tbuf);
   }
 
   if (reload) {
@@ -5102,16 +5102,15 @@ void buf_reload(buf_T *buf, int orig_mode)
   check_cursor();
   update_topline();
   keep_filetype = FALSE;
-  {
-    win_T       *wp;
-    tabpage_T   *tp;
 
-    /* Update folds unless they are defined manually. */
-    FOR_ALL_TAB_WINDOWS(tp, wp)
+  /* Update folds unless they are defined manually. */
+  FOR_ALL_TAB_WINDOWS(tp, wp) {
     if (wp->w_buffer == curwin->w_buffer
-        && !foldmethodIsManual(wp))
+        && !foldmethodIsManual(wp)) {
       foldUpdateAll(wp);
+    }
   }
+
   /* If the mode didn't change and 'readonly' was set, keep the old
    * value; the user probably used the ":view" command.  But don't
    * reset it, might have had a read error. */
@@ -5144,7 +5143,7 @@ void write_lnum_adjust(linenr_T offset)
     curbuf->b_no_eol_lnum += offset;
 }
 
-#if defined(BACKSLASH_IN_FILENAME) || defined(PROTO)
+#if defined(BACKSLASH_IN_FILENAME)
 /*
  * Convert all backslashes in fname to forward slashes in-place.
  */
@@ -5196,6 +5195,7 @@ static struct event_name {
   {"BufWriteCmd",     EVENT_BUFWRITECMD},
   {"CmdwinEnter",     EVENT_CMDWINENTER},
   {"CmdwinLeave",     EVENT_CMDWINLEAVE},
+  {"CmdUndefined",    EVENT_CMDUNDEFINED},
   {"ColorScheme",     EVENT_COLORSCHEME},
   {"CompleteDone",    EVENT_COMPLETEDONE},
   {"CursorHold",      EVENT_CURSORHOLD},
@@ -5329,22 +5329,23 @@ static void show_autocmd(AutoPat *ap, event_T event)
   msg_outtrans(ap->pat);
 
   for (ac = ap->cmds; ac != NULL; ac = ac->next) {
-    if (ac->cmd != NULL) {              /* skip removed commands */
-      if (msg_col >= 14)
-        msg_putchar('\n');
-      msg_col = 14;
+    if (ac->cmd == NULL) {              /* skip removed commands */
+      continue;
+    }
+    if (msg_col >= 14)
+      msg_putchar('\n');
+    msg_col = 14;
+    if (got_int)
+      return;
+    msg_outtrans(ac->cmd);
+    if (p_verbose > 0)
+      last_set_msg(ac->scriptID);
+    if (got_int)
+      return;
+    if (ac->next != NULL) {
+      msg_putchar('\n');
       if (got_int)
         return;
-      msg_outtrans(ac->cmd);
-      if (p_verbose > 0)
-        last_set_msg(ac->scriptID);
-      if (got_int)
-        return;
-      if (ac->next != NULL) {
-        msg_putchar('\n');
-        if (got_int)
-          return;
-      }
     }
   }
 }
@@ -5540,7 +5541,7 @@ void do_augroup(char_u *arg, int del_group)
   }
 }
 
-#if defined(EXITFREE) || defined(PROTO)
+#if defined(EXITFREE)
 void free_all_autocmds(void)
 {
   for (current_augroup = -1; current_augroup < augroups.ga_len;
@@ -5811,10 +5812,13 @@ void do_autocmd(char_u *arg, int forceit)
               nested, cmd, forceit, group) == FAIL)
         break;
   } else {
-    while (*arg && !vim_iswhite(*arg))
-      if (do_autocmd_event(event_name2nr(arg, &arg), pat,
-              nested, cmd, forceit, group) == FAIL)
+    while (*arg && !vim_iswhite(*arg)) {
+      event_T event = event_name2nr(arg, &arg);
+      assert(event < NUM_EVENTS);
+      if (do_autocmd_event(event, pat, nested, cmd, forceit, group) == FAIL) {
         break;
+      }
+    }
   }
 
   if (need_free)
@@ -6120,27 +6124,28 @@ void ex_doautoall(exarg_T *eap)
    * buffers or windows...
    */
   FOR_ALL_BUFFERS(buf) {
-    if (buf->b_ml.ml_mfp != NULL) {
-      /* find a window for this buffer and save some values */
-      aucmd_prepbuf(&aco, buf);
-
-      /* execute the autocommands for this buffer */
-      retval = do_doautocmd(arg, FALSE);
-
-      if (call_do_modelines) {
-        /* Execute the modeline settings, but don't set window-local
-         * options if we are using the current window for another
-         * buffer. */
-        do_modelines(curwin == aucmd_win ? OPT_NOWIN : 0);
-      }
-
-      /* restore the current window */
-      aucmd_restbuf(&aco);
-
-      /* stop if there is some error or buffer was deleted */
-      if (retval == FAIL || !buf_valid(buf))
-        break;
+    if (buf->b_ml.ml_mfp == NULL) {
+      continue;
     }
+    /* find a window for this buffer and save some values */
+    aucmd_prepbuf(&aco, buf);
+
+    /* execute the autocommands for this buffer */
+    retval = do_doautocmd(arg, FALSE);
+
+    if (call_do_modelines) {
+      /* Execute the modeline settings, but don't set window-local
+       * options if we are using the current window for another
+       * buffer. */
+      do_modelines(curwin == aucmd_win ? OPT_NOWIN : 0);
+    }
+
+    /* restore the current window */
+    aucmd_restbuf(&aco);
+
+    /* stop if there is some error or buffer was deleted */
+    if (retval == FAIL || !buf_valid(buf))
+      break;
   }
 
   check_cursor();           /* just in case lines got deleted */
@@ -6181,7 +6186,7 @@ aucmd_prepbuf (
     win = curwin;
   } else {
     win = NULL;
-    FOR_ALL_WINDOWS(wp) {
+    FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
       if (wp->w_buffer == buf) {
         win = wp;
         break;
@@ -6189,12 +6194,9 @@ aucmd_prepbuf (
     }
   }
 
-  /* Allocate "aucmd_win" when needed.  If this fails (out of memory) fall
-   * back to using the current window. */
+  /* Allocate "aucmd_win" when needed. */
   if (win == NULL && aucmd_win == NULL) {
     win_alloc_aucmd_win();
-    if (aucmd_win == NULL)
-      win = curwin;
   }
   if (win == NULL && aucmd_win_used)
     /* Strange recursive autocommand, fall back to using the current
@@ -6269,14 +6271,11 @@ aucmd_restbuf (
      * page. Do not trigger autocommands here. */
     block_autocmds();
     if (curwin != aucmd_win) {
-      tabpage_T   *tp;
-      win_T       *wp;
-
-      FOR_ALL_TAB_WINDOWS(tp, wp)
-      {
+      FOR_ALL_TAB_WINDOWS(tp, wp) {
         if (wp == aucmd_win) {
-          if (tp != curtab)
+          if (tp != curtab) {
             goto_tabpage_tp(tp, TRUE, TRUE);
+          }
           win_goto(aucmd_win);
           goto win_found;
         }
@@ -6331,6 +6330,9 @@ win_found:
 
       curwin = aco->save_curwin;
       curbuf = curwin->w_buffer;
+      // In case the autocommand moves the cursor to a position that does not
+      // exist in curbuf
+      check_cursor();
     }
   }
 }
@@ -6463,6 +6465,18 @@ int has_insertcharpre(void)
   return first_autopat[(int)EVENT_INSERTCHARPRE] != NULL;
 }
 
+/// @returns true when there is an CmdUndefined autocommand defined.
+int has_cmdundefined(void)
+{
+  return first_autopat[(int)EVENT_CMDUNDEFINED] != NULL;
+}
+
+/// @returns true when there is an FuncUndefined autocommand defined.
+int has_funcundefined(void)
+{
+  return first_autopat[(int)EVENT_FUNCUNDEFINED] != NULL;
+}
+
 static int 
 apply_autocmds_group (
     event_T event,
@@ -6477,7 +6491,7 @@ apply_autocmds_group (
 {
   char_u      *sfname = NULL;   /* short file name */
   char_u      *tail;
-  int save_changed;
+  bool save_changed;
   buf_T       *old_curbuf;
   int retval = FALSE;
   char_u      *save_sourcing_name;
@@ -6754,7 +6768,8 @@ apply_autocmds_group (
   --nesting;            /* see matching increment above */
 
   // When stopping to execute autocommands, restore the search patterns and
-  // the redo buffer.  Free buffers in the au_pending_free_buf list.
+  // the redo buffer. Free any buffers in the au_pending_free_buf list and
+  // free any windows in the au_pending_free_win list.
   if (!autocmd_busy) {
     restore_search_patterns();
     restoreRedobuff();
@@ -6763,6 +6778,11 @@ apply_autocmds_group (
       buf_T *b = au_pending_free_buf->b_next;
       free(au_pending_free_buf);
       au_pending_free_buf = b;
+    }
+    while (au_pending_free_win != NULL) {
+      win_T *w = au_pending_free_win->w_next;
+      free(au_pending_free_win);
+      au_pending_free_win = w;
     }
   }
 
@@ -6812,7 +6832,7 @@ void unblock_autocmds(void)
 
   /* When v:termresponse was set while autocommands were blocked, trigger
    * the autocommands now.  Esp. useful when executing a shell command
-   * during startup (vimdiff). */
+   * during startup (nvim -d). */
   if (autocmd_blocked == 0
       && get_vim_var_str(VV_TERMRESPONSE) != old_termresponse)
     apply_autocmds(EVENT_TERMRESPONSE, NULL, NULL, FALSE, curbuf);
@@ -7431,7 +7451,7 @@ file_pat_to_reg_pat (
   return reg_pat;
 }
 
-#if defined(EINTR) || defined(PROTO)
+#if defined(EINTR)
 /*
  * Version of read() that retries when interrupted by EINTR (possibly
  * by a SIGWINCH).

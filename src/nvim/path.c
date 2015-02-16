@@ -31,7 +31,7 @@
 #include "nvim/strings.h"
 #include "nvim/tag.h"
 #include "nvim/types.h"
-#include "nvim/ui.h"
+#include "nvim/os/input.h"
 #include "nvim/window.h"
 
 #define URL_SLASH       1               /* path_is_url() has found "://" */
@@ -179,7 +179,7 @@ char_u *path_next_component(char_u *fname)
 
 /*
  * Get a pointer to one character past the head of a path name.
- * Unix: after "/"; DOS: after "c:\"; Amiga: after "disk:/"; Mac: no head.
+ * Unix: after "/"; DOS: after "c:\"; Mac: no head.
  * If there is no head, path is returned.
  */
 char_u *get_past_head(char_u *path)
@@ -239,33 +239,31 @@ int vim_ispathlistsep(int c)
  * Shorten the path of a file from "~/foo/../.bar/fname" to "~/f/../.b/fname"
  * It's done in-place.
  */
-void shorten_dir(char_u *str)
+char_u *shorten_dir(char_u *str)
 {
-  char_u      *tail, *s, *d;
-  int skip = FALSE;
-
-  tail = path_tail(str);
-  d = str;
-  for (s = str;; ++s) {
+  char_u *tail = path_tail(str);
+  char_u *d = str;
+  bool skip = false;
+  for (char_u *s = str;; ++s) {
     if (s >= tail) {                /* copy the whole tail */
       *d++ = *s;
       if (*s == NUL)
         break;
     } else if (vim_ispathsep(*s)) {       /* copy '/' and next char */
       *d++ = *s;
-      skip = FALSE;
+      skip = false;
     } else if (!skip) {
       *d++ = *s;                    /* copy next char */
       if (*s != '~' && *s != '.')       /* and leading "~" and "." */
-        skip = TRUE;
+        skip = true;
       if (has_mbyte) {
         int l = mb_ptr2len(s);
-
         while (--l > 0)
           *d++ = *++s;
       }
     }
   }
+  return str;
 }
 
 /*
@@ -403,9 +401,9 @@ char_u *save_absolute_path(const char_u *name)
 }
 
 
-#if !defined(NO_EXPANDPATH) || defined(PROTO)
+#if !defined(NO_EXPANDPATH)
 
-#if defined(UNIX) || defined(USE_UNIXFILENAME) || defined(PROTO)
+#if defined(UNIX) || defined(USE_UNIXFILENAME)
 /*
  * Unix style wildcard expansion code.
  * It's here because it's used both for Unix and Mac.
@@ -449,7 +447,7 @@ unix_expandpath (
 
   /* Expanding "**" may take a long time, check for CTRL-C. */
   if (stardepth > 0) {
-    ui_breakcheck();
+    os_breakcheck();
     if (got_int)
       return 0;
   }
@@ -850,7 +848,7 @@ static void uniquefy_paths(garray_T *gap, char_u *pattern)
         STRMOVE(path + STRLEN(path), short_name);
       }
     }
-    ui_breakcheck();
+    os_breakcheck();
   }
 
   /* Shorten filenames in /in/current/directory/{filename} */
@@ -879,15 +877,13 @@ static void uniquefy_paths(garray_T *gap, char_u *pattern)
     free(fnames[i]);
     fnames[i] = rel_path;
     sort_again = TRUE;
-    ui_breakcheck();
+    os_breakcheck();
   }
 
   free(curdir);
-  if (in_curdir != NULL) {
-    for (int i = 0; i < gap->ga_len; i++)
-      free(in_curdir[i]);
-    free(in_curdir);
-  }
+  for (int i = 0; i < gap->ga_len; i++)
+    free(in_curdir[i]);
+  free(in_curdir);
   ga_clear_strings(&path_ga);
   vim_regfree(regmatch.regprog);
 
@@ -1080,7 +1076,7 @@ gen_expand_wildcards (
           free(p);
           ga_clear_strings(&ga);
           i = mch_expand_wildcards(num_pat, pat, num_file, file,
-              flags);
+              flags | EW_KEEPDOLLAR);
           recursive = FALSE;
           return i;
         }
@@ -1172,7 +1168,7 @@ expand_backtick (
     buffer = eval_to_string(cmd + 1, &p, TRUE);
   else
     buffer = get_cmd_output(cmd, NULL,
-        (flags & EW_SILENT) ? kShellOptSilent : 0);
+        (flags & EW_SILENT) ? kShellOptSilent : 0, NULL);
   free(cmd);
   if (buffer == NULL)
     return 0;
@@ -1622,7 +1618,7 @@ int same_directory(char_u *f1, char_u *f2)
          && pathcmp((char *)ffname, (char *)f2, (int)(t1 - ffname)) == 0;
 }
 
-#if !defined(NO_EXPANDPATH) || defined(PROTO)
+#if !defined(NO_EXPANDPATH)
 /*
  * Compare path "p[]" to "q[]".
  * If "maxlen" >= 0 compare "p[maxlen]" to "q[maxlen]"

@@ -1,7 +1,5 @@
 /*
  * VIM - Vi IMproved	by Bram Moolenaar
- *	      OS/2 port by Paul Slootman
- *	      VMS merge by Zoltan Arpadffy
  *
  * Do ":help uganda"  in Vim to read copying and usage conditions.
  * Do ":help credits" in Vim to see a list of people who contributed.
@@ -10,12 +8,12 @@
 
 /*
  * os_unix.c -- code for all flavors of Unix (BSD, SYSV, SVR4, POSIX, ...)
- *	     Also for BeOS and Atari MiNT.
  *
  * A lot of this file was originally written by Juergen Weigert and later
  * changed beyond recognition.
  */
 
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -38,6 +36,7 @@
 #include "nvim/message.h"
 #include "nvim/misc1.h"
 #include "nvim/misc2.h"
+#include "nvim/mouse.h"
 #include "nvim/garray.h"
 #include "nvim/path.h"
 #include "nvim/screen.h"
@@ -45,8 +44,8 @@
 #include "nvim/syntax.h"
 #include "nvim/tempfile.h"
 #include "nvim/term.h"
-#include "nvim/types.h"
 #include "nvim/ui.h"
+#include "nvim/types.h"
 #include "nvim/os/os.h"
 #include "nvim/os/time.h"
 #include "nvim/os/event.h"
@@ -54,8 +53,8 @@
 #include "nvim/os/shell.h"
 #include "nvim/os/signal.h"
 #include "nvim/os/job.h"
-#include "nvim/os/msgpack_rpc.h"
-#include "nvim/os/msgpack_rpc_helpers.h"
+#include "nvim/msgpack_rpc/helpers.h"
+#include "nvim/msgpack_rpc/defs.h"
 
 #if defined(HAVE_SYS_IOCTL_H)
 # include <sys/ioctl.h>
@@ -83,47 +82,22 @@ static int did_set_title = FALSE;
 static char_u   *oldicon = NULL;
 static int did_set_icon = FALSE;
 
-
-
-/*
- * Write s[len] to the screen.
- */
-void mch_write(char_u *s, int len)
-{
-  if (embedded_mode) {
-    // TODO(tarruda): This is a temporary hack to stop Neovim from writing
-    // messages to stdout in embedded mode. In the future, embedded mode will
-    // be the only possibility(GUIs will always start neovim with a msgpack-rpc
-    // over stdio) and this function won't exist.
-    //
-    // The reason for this is because before Neovim fully migrates to a
-    // msgpack-rpc-driven architecture, we must have a fully functional
-    // UI working
-    return;
-  }
-
-  ignored = (int)write(1, (char *)s, len);
-  if (p_wd)             /* Unix is too fast, slow down a bit more */
-    os_microdelay(p_wd, false);
-}
-
 /*
  * If the machine has job control, use it to suspend the program,
  * otherwise fake it by starting a new shell.
  */
 void mch_suspend(void)
 {
-  /* BeOS does have SIGTSTP, but it doesn't work. */
-#if defined(SIGTSTP) && !defined(__BEOS__)
+#if defined(SIGTSTP)
   out_flush();              /* needed to make cursor visible on some systems */
   settmode(TMODE_COOK);
   out_flush();              /* needed to disable mouse on some systems */
 
-
+  // Note: compiler defines _REENTRANT when given -pthread flag.
 # if defined(_REENTRANT) && defined(SIGCONT)
   sigcont_received = FALSE;
 # endif
-  kill(0, SIGTSTP);         /* send ourselves a STOP signal */
+  uv_kill(0, SIGTSTP);         // send ourselves a STOP signal
 # if defined(_REENTRANT) && defined(SIGCONT)
   /*
    * Wait for the SIGCONT signal to be handled. It generally happens
@@ -153,22 +127,6 @@ void mch_suspend(void)
   need_check_timestamps = TRUE;
   did_check_timestamps = FALSE;
 #endif
-}
-
-void mch_init(void)
-{
-  Columns = 80;
-  Rows = 24;
-
-  out_flush();
-
-#ifdef MACOS_CONVERT
-  mac_conv_init();
-#endif
-
-  msgpack_rpc_init();
-  msgpack_rpc_helpers_init();
-  event_init();
 }
 
 static int get_x11_title(int test_only)
@@ -225,22 +183,26 @@ void mch_settitle(char_u *title, char_u *icon)
    * Note: if "t_ts" is set, title is set with escape sequence rather
    *	     than x11 calls, because the x11 calls don't always work
    */
-  if ((type || *T_TS != NUL) && title != NULL) {
+  if ((type || *T_TS != NUL || abstract_ui) && title != NULL) {
     if (oldtitle == NULL
         )                       /* first call but not in GUI, save title */
       (void)get_x11_title(FALSE);
 
-    if (*T_TS != NUL)                   /* it's OK if t_fs is empty */
+    if (abstract_ui) {
+      ui_set_title((char *)title);
+    } else if (*T_TS != NUL)                   /* it's OK if t_fs is empty */
       term_settitle(title);
     did_set_title = TRUE;
   }
 
-  if ((type || *T_CIS != NUL) && icon != NULL) {
+  if ((type || *T_CIS != NUL || abstract_ui) && icon != NULL) {
     if (oldicon == NULL
         )                       /* first call, save icon */
       get_x11_icon(FALSE);
 
-    if (*T_CIS != NUL) {
+    if (abstract_ui) {
+      ui_set_icon((char *)icon);
+    } else if (*T_CIS != NUL) {
       out_str(T_CIS);                           /* set icon start */
       out_str_nf(icon);
       out_str(T_CIE);                           /* set icon end */
@@ -314,7 +276,7 @@ int use_xterm_mouse(void)
   return 0;
 }
 
-#if defined(USE_FNAME_CASE) || defined(PROTO)
+#if defined(USE_FNAME_CASE)
 /*
  * Set the case of the file name, if it already exists.  This will cause the
  * file name to remain exactly the same.
@@ -370,7 +332,7 @@ int len               /* buffer size, only used when name gets longer */
 }
 #endif
 
-#if defined(HAVE_ACL) || defined(PROTO)
+#if defined(HAVE_ACL)
 # ifdef HAVE_SYS_ACL_H
 #  include <sys/acl.h>
 # endif
@@ -379,7 +341,7 @@ int len               /* buffer size, only used when name gets longer */
 # endif
 
 
-#if defined(HAVE_SELINUX) || defined(PROTO)
+#if defined(HAVE_SELINUX)
 /*
  * Copy security info from "from_file" to "to_file".
  */
@@ -481,13 +443,7 @@ int mch_nodetype(char_u *name)
   return NODE_WRITABLE;
 }
 
-void mch_early_init(void)
-{
-  handle_init();
-  time_init();
-}
-
-#if defined(EXITFREE) || defined(PROTO)
+#if defined(EXITFREE)
 void mch_free_mem(void)
 {
   free(oldtitle);
@@ -524,8 +480,6 @@ void mch_exit(int r)
 {
   exiting = TRUE;
 
-  event_teardown();
-
   {
     settmode(TMODE_COOK);
     mch_restore_title(3);       /* restore xterm title and icon name */
@@ -561,7 +515,7 @@ void mch_exit(int r)
   mac_conv_cleanup();
 #endif
 
-
+  event_teardown();
 
 #ifdef EXITFREE
   free_all_mem();
@@ -574,9 +528,8 @@ void mch_settmode(int tmode)
 {
   static int first = TRUE;
 
-  /* Why is NeXT excluded here (and not in os_unixx.h)? */
 #if defined(ECHOE) && defined(ICANON) && (defined(HAVE_TERMIO_H) || \
-  defined(HAVE_TERMIOS_H)) && !defined(__NeXT__)
+  defined(HAVE_TERMIOS_H))
   /*
    * for "new" tty systems
    */
@@ -604,9 +557,8 @@ void mch_settmode(int tmode)
      */
     tnew.c_iflag &= ~ICRNL;
     tnew.c_lflag &= ~(ICANON | ECHO | ISIG | ECHOE
-# if defined(IEXTEN) && !defined(__MINT__)
+# if defined(IEXTEN)
                       | IEXTEN      /* IEXTEN enables typing ^V on SOLARIS */
-                                    /* but it breaks function keys on MINT */
 # endif
                       );
 # ifdef ONLCR       /* don't map NL -> CR NL, we do it ourselves */
@@ -672,9 +624,8 @@ void get_stty(void)
   char_u buf[2];
   char_u  *p;
 
-  /* Why is NeXT excluded here (and not in os_unixx.h)? */
 #if defined(ECHOE) && defined(ICANON) && (defined(HAVE_TERMIO_H) || \
-  defined(HAVE_TERMIOS_H)) && !defined(__NeXT__)
+  defined(HAVE_TERMIOS_H))
   /* for "new" tty systems */
 # ifdef HAVE_TERMIOS_H
   struct termios keys;
@@ -761,11 +712,11 @@ void mch_setmouse(int on)
 
 }
 
-/*
- * Set the mouse termcode, depending on the 'term' and 'ttymouse' options.
- */
+/// Sets the mouse termcode, depending on the 'term' and 'ttymouse' options.
 void check_mouse_termcode(void)
 {
+  xterm_conflict_mouse = false;
+
   if (use_xterm_mouse()
       && use_xterm_mouse() != 3
       ) {
@@ -791,29 +742,31 @@ void check_mouse_termcode(void)
   else
     del_mouse_termcode(KS_NETTERM_MOUSE);
 
-  /* conflicts with xterm mouse: "\033[" and "\033[M" */
-  if (!use_xterm_mouse()
-      )
+  // Conflicts with xterm mouse: "\033[" and "\033[M".
+  // Also conflicts with the xterm termresponse, skip this if it was requested
+  // already.
+  if (!use_xterm_mouse()) {
     set_mouse_termcode(KS_DEC_MOUSE, (char_u *)(term_is_8bit(T_NAME)
                                                 ? "\233" : "\033["));
-  else
+    xterm_conflict_mouse = true;
+  }
+  else {
     del_mouse_termcode(KS_DEC_MOUSE);
+  }
   /* same as the dec mouse */
-  if (use_xterm_mouse() == 3
-      ) {
-    set_mouse_termcode(KS_URXVT_MOUSE, (char_u *)(term_is_8bit(T_NAME)
-                                                  ? "\233"
-                                                  : "\033["));
-
+  if (use_xterm_mouse() == 3 && !did_request_esc_sequence()) {
+    set_mouse_termcode(KS_URXVT_MOUSE,
+                       (char_u *)(term_is_8bit(T_NAME) ? "\233" : "\033["));
     if (*p_mouse != NUL) {
-      mch_setmouse(FALSE);
+      mch_setmouse(false);
       setmouse();
     }
-  } else
+    resume_get_esc_sequence();
+  } else {
     del_mouse_termcode(KS_URXVT_MOUSE);
-  /* There is no conflict with xterm mouse */
-  if (use_xterm_mouse() == 4
-      ) {
+  }
+  // There is no conflict with xterm mouse.
+  if (use_xterm_mouse() == 4) {
     set_mouse_termcode(KS_SGR_MOUSE, (char_u *)(term_is_8bit(T_NAME)
                                                 ? "\233<"
                                                 : "\033[<"));
@@ -822,8 +775,9 @@ void check_mouse_termcode(void)
       mch_setmouse(FALSE);
       setmouse();
     }
-  } else
+  } else {
     del_mouse_termcode(KS_SGR_MOUSE);
+  }
 }
 
 /*
@@ -1117,10 +1071,12 @@ int mch_expand_wildcards(int num_pat, char_u **pat, int *num_file,
               || pat[i][j + 1] == '`')
             *p++ = '\\';
           ++j;
-        } else if (!intick && vim_strchr(SHELL_SPECIAL,
-                       pat[i][j]) != NULL)
+        } else if (!intick
+            && ((flags & EW_KEEPDOLLAR) == 0 || pat[i][j] != '$')
+            && vim_strchr(SHELL_SPECIAL, pat[i][j]) != NULL)
           /* Put a backslash before a special character, but not
-           * when inside ``. */
+           * when inside ``. And not for $var when EW_KEEPDOLLAR is
+           * set. */
           *p++ = '\\';
 
         /* Copy one character. */
@@ -1168,7 +1124,7 @@ int mch_expand_wildcards(int num_pat, char_u **pat, int *num_file,
 
   free(command);
 
-  if (i != 0) {                         /* mch_call_shell() failed */
+  if (i) {                         /* os_call_shell() failed */
     os_remove((char *)tempname);
     free(tempname);
     /*
@@ -1203,14 +1159,30 @@ int mch_expand_wildcards(int num_pat, char_u **pat, int *num_file,
     free(tempname);
     goto notfound;
   }
-  fseek(fd, 0L, SEEK_END);
-  len = ftell(fd);                      /* get size of temp file */
+  int fseek_res = fseek(fd, 0L, SEEK_END);
+  if (fseek_res < 0) {
+    free(tempname);
+    fclose(fd);
+    return FAIL;
+  }
+  long long templen = ftell(fd);        /* get size of temp file */
+  if (templen < 0) {
+    free(tempname);
+    fclose(fd);
+    return FAIL;
+  }
+#if SIZEOF_LONG_LONG > SIZEOF_SIZE_T
+  assert(templen <= (long long)SIZE_MAX);
+#endif
+  len = (size_t)templen;
   fseek(fd, 0L, SEEK_SET);
   buffer = xmalloc(len + 1);
-  i = fread((char *)buffer, 1, len, fd);
+  // fread() doesn't terminate buffer with NUL;
+  // appropiate termination (not always NUL) is done below.
+  size_t readlen = fread((char *)buffer, 1, len, fd);
   fclose(fd);
   os_remove((char *)tempname);
-  if (i != (int)len) {
+  if (readlen != len) {
     /* unexpected read error */
     EMSG2(_(e_notread), tempname);
     free(tempname);
@@ -1218,8 +1190,6 @@ int mch_expand_wildcards(int num_pat, char_u **pat, int *num_file,
     return FAIL;
   }
   free(tempname);
-
-
 
   /* file names are separated with Space */
   if (shell_style == STYLE_ECHO) {
@@ -1280,6 +1250,8 @@ int mch_expand_wildcards(int num_pat, char_u **pat, int *num_file,
     if (len)
       ++i;                              /* count last entry */
   }
+  assert(buffer[len] == NUL || buffer[len] == '\n');
+
   if (i == 0) {
     /*
      * Can happen when using /bin/sh and typing ":e $NO_SUCH_VAR^I".

@@ -18,6 +18,7 @@
 #include "nvim/search.h"
 #include "nvim/strings.h"
 #include "nvim/window.h"
+#include "nvim/edit.h"
 
 static pumitem_T *pum_array = NULL; // items of displayed pum
 static int pum_size;                // nr of items in "pum_array"
@@ -369,17 +370,13 @@ void pum_redraw(void)
                   size++;
                 }
               }
-              screen_puts_len(rt, (int)STRLEN(rt), row, col - size + 1,
-                              attr);
+              screen_puts_len(rt, (int)STRLEN(rt), row, col - size + 1, attr);
               free(rt_start);
               free(st);
-
               col -= width;
             } else {
-              if (st != NULL) {
-                screen_puts_len(st, (int)STRLEN(st), row, col, attr);
-                free(st);
-              }
+              screen_puts_len(st, (int)STRLEN(st), row, col, attr);
+              free(st);
               col += width;
             }
 
@@ -540,7 +537,9 @@ static int pum_set_selected(int n, int repeat)
       if ((p_pvh > 0) && (p_pvh < g_do_tagpreview)) {
         g_do_tagpreview = p_pvh;
       }
+      RedrawingDisabled++;
       resized = prepare_tagpreview(false);
+      RedrawingDisabled--;
       g_do_tagpreview = 0;
 
       if (curwin->w_p_pvw) {
@@ -601,12 +600,19 @@ static int pum_set_selected(int n, int repeat)
             }
           }
 
-          curbuf->b_changed = 0;
+          curbuf->b_changed = false;
           curbuf->b_p_ma = FALSE;
           curwin->w_cursor.lnum = 1;
           curwin->w_cursor.col = 0;
 
           if ((curwin != curwin_save) && win_valid(curwin_save)) {
+            // When the first completion is done and the preview
+            // window is not resized, skip the preview window's
+            // status line redrawing.
+            if (ins_compl_active() && !resized) {
+              curwin->w_redr_status = FALSE;
+            }
+
             // Return cursor to where we were
             validate_cursor();
             redraw_later(SOME_VALID);

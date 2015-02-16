@@ -1,7 +1,7 @@
 " These commands create the option window.
 "
 " Maintainer:	Bram Moolenaar <Bram@vim.org>
-" Last Change:	2014 Apr 01
+" Last Change:	2014 Oct 09
 
 " If there already is an option window, jump to that one.
 if bufwinnr("option-window") > 0
@@ -520,8 +520,6 @@ call append("$", "ttytype\talias for 'term'")
 call <SID>OptionG("tty", &tty)
 call append("$", "ttybuiltin\tcheck built-in termcaps first")
 call <SID>BinOptionG("tbi", &tbi)
-call append("$", "ttyfast\tterminal connection is fast")
-call <SID>BinOptionG("tf", &tf)
 call append("$", "weirdinvert\tterminal that requires extra redrawing")
 call <SID>BinOptionG("wiv", &wiv)
 call append("$", "esckeys\trecognize keys that start with <Esc> in Insert mode")
@@ -724,6 +722,7 @@ call <SID>OptionG("km", &km)
 
 call <SID>Header("editing text")
 call append("$", "undolevels\tmaximum number of changes that can be undone")
+call append("$", "\t(global or local to buffer)")
 call append("$", " \tset ul=" . &ul)
 call append("$", "undoreload\tmaximum number lines to save for undo on a buffer reload")
 call append("$", " \tset ur=" . &ur)
@@ -969,6 +968,7 @@ call <SID>BinOptionG("bk", &bk)
 call append("$", "backupskip\tpatterns that specify for which files a backup is not made")
 call append("$", " \tset bsk=" . &bsk)
 call append("$", "backupcopy\twhether to make the backup as a copy or rename the existing file")
+call append("$", "\t(global or local to buffer)")
 call append("$", " \tset bkc=" . &bkc)
 call append("$", "backupdir\tlist of directories to put backup files in")
 call <SID>OptionG("bdir", &bdir)
@@ -987,14 +987,6 @@ call append("$", "patchmode\tkeep oldest version of a file; specifies file name 
 call <SID>OptionG("pm", &pm)
 call append("$", "fsync\tforcibly sync the file to disk after writing it")
 call <SID>BinOptionG("fs", &fs)
-if !has("msdos")
-  call append("$", "shortname\tuse 8.3 file names")
-  call append("$", "\t(local to buffer)")
-  call <SID>BinOptionL("sn")
-endif
-call append("$", "cryptmethod\tencryption method for file writing: zip or blowfish")
-call append("$", "\t(local to buffer)")
-call <SID>OptionL("cm")
 
 
 call <SID>Header("the swap file")
@@ -1062,10 +1054,6 @@ call <SID>OptionG("udir", &udir)
 call <SID>Header("executing external commands")
 call append("$", "shell\tname of the shell program used for external commands")
 call <SID>OptionG("sh", &sh)
-if has("amiga")
-  call append("$", "shelltype\twhen to use the shell or directly execute a command")
-  call append("$", " \tset st=" . &st)
-endif
 call append("$", "shellquote\tcharacter(s) to enclose a shell command in")
 call <SID>OptionG("shq", &shq)
 call append("$", "shellxquote\tlike 'shellquote' but include the redirection")
@@ -1111,20 +1099,9 @@ if has("quickfix")
 endif
 
 
-if has("msdos") || has("os2") || has("win16") || has("win32") || has("osfiletype")
+if has("msdos") || has("win16") || has("win32")
   call <SID>Header("system specific")
-  if has("msdos")
-    call append("$", "bioskey\tcall the BIOS to get a keyoard character")
-    call <SID>BinOptionG("biosk", &biosk)
-    call append("$", "conskey\tuse direct console I/O to get a keyboard character")
-    call <SID>BinOptionG("consk", &consk)
-  endif
-  if has("osfiletype")
-    call append("$", "osfiletype\tOS-specific information about the type of file")
-    call append("$", "\t(local to buffer)")
-    call <SID>OptionL("oft")
-  endif
-  if has("msdos") || has("os2") || has("win16") || has("win32")
+  if has("msdos") || has("win16") || has("win32")
     call append("$", "shellslash\tuse forward slashes in file names; for Unix-like shells")
     call <SID>BinOptionG("ssl", &ssl)
   endif

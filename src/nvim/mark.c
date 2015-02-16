@@ -38,8 +38,8 @@
 #include "nvim/search.h"
 #include "nvim/strings.h"
 #include "nvim/term.h"
-#include "nvim/ui.h"
 #include "nvim/os/os.h"
+#include "nvim/os/input.h"
 
 /*
  * This file contains routines to maintain and manipulate marks.
@@ -127,6 +127,7 @@ int setmark_pos(int c, pos_T *pos, int fnum)
     return OK;
   }
   if (isupper(c)) {
+    assert(c >= 'A' && c <= 'Z');
     i = c - 'A';
     namedfm[i].fmark.mark = *pos;
     namedfm[i].fmark.fnum = fnum;
@@ -505,13 +506,11 @@ void fmarks_check_names(buf_T *buf)
     return;
 
   name = home_replace_save(buf, buf->b_ffname);
-  if (name == NULL)
-    return;
 
   for (i = 0; i < NMARKS + EXTRA_MARKS; ++i)
     fmarks_check_one(&namedfm[i], name, buf);
 
-  FOR_ALL_WINDOWS(wp) {
+  FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
     for (i = 0; i < wp->w_jumplistlen; ++i) {
       fmarks_check_one(&wp->w_jumplist[i], name, buf);
     }
@@ -811,7 +810,7 @@ void ex_jumps(exarg_T *eap)
           curwin->w_jumplist[i].fmark.fnum == curbuf->b_fnum
           ? hl_attr(HLF_D) : 0);
       free(name);
-      ui_breakcheck();
+      os_breakcheck();
     }
     out_flush();
   }
@@ -845,7 +844,7 @@ void ex_changes(exarg_T *eap)
       name = mark_line(&curbuf->b_changelist[i], 17);
       msg_outtrans_attr(name, hl_attr(HLF_D));
       free(name);
-      ui_breakcheck();
+      os_breakcheck();
     }
     out_flush();
   }
@@ -898,8 +897,6 @@ void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
   int i;
   int fnum = curbuf->b_fnum;
   linenr_T    *lp;
-  win_T       *win;
-  tabpage_T   *tab;
   static pos_T initpos = INIT_POS_T(1, 0, 0);
 
   if (line2 < line1 && amount_after == 0L)          /* nothing to do */
@@ -939,8 +936,9 @@ void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
     /* quickfix marks */
     qf_mark_adjust(NULL, line1, line2, amount, amount_after);
     /* location lists */
-    FOR_ALL_TAB_WINDOWS(tab, win)
-        qf_mark_adjust(win, line1, line2, amount, amount_after);
+    FOR_ALL_TAB_WINDOWS(tab, win) {
+      qf_mark_adjust(win, line1, line2, amount, amount_after);
+    }
 
     sign_mark_adjust(line1, line2, amount, amount_after);
   }
@@ -958,21 +956,26 @@ void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
   /*
    * Adjust items in all windows related to the current buffer.
    */
-  FOR_ALL_TAB_WINDOWS(tab, win)
-  {
-    if (!cmdmod.lockmarks)
+  FOR_ALL_TAB_WINDOWS(tab, win) {
+    if (!cmdmod.lockmarks) {
       /* Marks in the jumplist.  When deleting lines, this may create
        * duplicate marks in the jumplist, they will be removed later. */
-      for (i = 0; i < win->w_jumplistlen; ++i)
-        if (win->w_jumplist[i].fmark.fnum == fnum)
+      for (i = 0; i < win->w_jumplistlen; ++i) {
+        if (win->w_jumplist[i].fmark.fnum == fnum) {
           one_adjust_nodel(&(win->w_jumplist[i].fmark.mark.lnum));
+        }
+      }
+    }
 
     if (win->w_buffer == curbuf) {
-      if (!cmdmod.lockmarks)
+      if (!cmdmod.lockmarks) {
         /* marks in the tag stack */
-        for (i = 0; i < win->w_tagstacklen; i++)
-          if (win->w_tagstack[i].fmark.fnum == fnum)
+        for (i = 0; i < win->w_tagstacklen; i++) {
+          if (win->w_tagstack[i].fmark.fnum == fnum) {
             one_adjust_nodel(&(win->w_tagstack[i].fmark.mark.lnum));
+          }
+        }
+      }
 
       /* the displayed Visual area */
       if (win->w_old_cursor_lnum != 0) {
@@ -985,12 +988,14 @@ void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
       if (win != curwin) {
         if (win->w_topline >= line1 && win->w_topline <= line2) {
           if (amount == MAXLNUM) {                  /* topline is deleted */
-            if (line1 <= 1)
+            if (line1 <= 1) {
               win->w_topline = 1;
-            else
+            } else {
               win->w_topline = line1 - 1;
-          } else                        /* keep topline on the same line */
+            }
+          } else {                      /* keep topline on the same line */
             win->w_topline += amount;
+          }
           win->w_topfill = 0;
         } else if (amount_after && win->w_topline > line2) {
           win->w_topline += amount_after;
@@ -998,15 +1003,18 @@ void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
         }
         if (win->w_cursor.lnum >= line1 && win->w_cursor.lnum <= line2) {
           if (amount == MAXLNUM) {         /* line with cursor is deleted */
-            if (line1 <= 1)
+            if (line1 <= 1) {
               win->w_cursor.lnum = 1;
-            else
+            } else {
               win->w_cursor.lnum = line1 - 1;
+            }
             win->w_cursor.col = 0;
-          } else                        /* keep cursor on the same line */
+          } else {                      /* keep cursor on the same line */
             win->w_cursor.lnum += amount;
-        } else if (amount_after && win->w_cursor.lnum > line2)
+          }
+        } else if (amount_after && win->w_cursor.lnum > line2) {
           win->w_cursor.lnum += amount_after;
+        }
       }
 
       /* adjust folds */
@@ -1083,7 +1091,7 @@ void mark_col_adjust(linenr_T lnum, colnr_T mincol, long lnum_amount, long col_a
   /*
    * Adjust items in all windows related to the current buffer.
    */
-  FOR_ALL_WINDOWS(win) {
+  FOR_ALL_WINDOWS_IN_TAB(win, curtab) {
     /* marks in the jumplist */
     for (i = 0; i < win->w_jumplistlen; ++i) {
       if (win->w_jumplist[i].fmark.fnum == fnum) {
@@ -1170,7 +1178,7 @@ void set_last_cursor(win_T *win)
     win->w_buffer->b_last_cursor = win->w_cursor;
 }
 
-#if defined(EXITFREE) || defined(PROTO)
+#if defined(EXITFREE)
 void free_all_marks(void)
 {
   int i;
@@ -1210,13 +1218,15 @@ int read_viminfo_filemark(vir_T *virp, int force)
       }
     } else if (VIM_ISDIGIT(*str))
       fm = &namedfm[*str - '0' + NMARKS];
-    else
+    else {  // is uppercase
+      assert(*str >= 'A' && *str <= 'Z');
       fm = &namedfm[*str - 'A'];
+    }
     if (fm != NULL && (fm->fmark.mark.lnum == 0 || force)) {
       str = skipwhite(str + 1);
-      fm->fmark.mark.lnum = getdigits(&str);
+      fm->fmark.mark.lnum = getdigits_long(&str);
       str = skipwhite(str);
-      fm->fmark.mark.col = getdigits(&str);
+      fm->fmark.mark.col = getdigits_int(&str);
       fm->fmark.mark.coladd = 0;
       fm->fmark.fnum = 0;
       str = skipwhite(str);
@@ -1315,19 +1325,17 @@ int removable(char_u *name)
   size_t n;
 
   name = home_replace_save(NULL, name);
-  if (name != NULL) {
-    for (p = p_viminfo; *p; ) {
-      copy_option_part(&p, part, 51, ", ");
-      if (part[0] == 'r') {
-        n = STRLEN(part + 1);
-        if (MB_STRNICMP(part + 1, name, n) == 0) {
-          retval = TRUE;
-          break;
-        }
+  for (p = p_viminfo; *p; ) {
+    copy_option_part(&p, part, 51, ", ");
+    if (part[0] == 'r') {
+      n = STRLEN(part + 1);
+      if (MB_STRNICMP(part + 1, name, n) == 0) {
+        retval = TRUE;
+        break;
       }
     }
-    free(name);
   }
+  free(name);
   return retval;
 }
 
@@ -1338,12 +1346,6 @@ int removable(char_u *name)
  */
 int write_viminfo_marks(FILE *fp_out)
 {
-  int count;
-  int is_mark_set;
-  int i;
-  win_T       *win;
-  tabpage_T   *tp;
-
   /*
    * Set b_last_cursor for the all buffers that have a window.
    */
@@ -1352,22 +1354,22 @@ int write_viminfo_marks(FILE *fp_out)
   }
 
   fputs(_("\n# History of marks within files (newest to oldest):\n"), fp_out);
-  count = 0;
+  int count = 0;
   FOR_ALL_BUFFERS(buf) {
     /*
      * Only write something if buffer has been loaded and at least one
      * mark is set.
      */
     if (buf->b_marks_read) {
-      if (buf->b_last_cursor.lnum != 0)
-        is_mark_set = TRUE;
-      else {
-        is_mark_set = FALSE;
-        for (i = 0; i < NMARKS; i++)
+      bool is_mark_set = true;
+      if (buf->b_last_cursor.lnum == 0) {
+        is_mark_set = false;
+        for (int i = 0; i < NMARKS; i++) {
           if (buf->b_namedm[i].lnum != 0) {
-            is_mark_set = TRUE;
+            is_mark_set = true;
             break;
           }
+        }
       }
       if (is_mark_set && buf->b_ffname != NULL
           && buf->b_ffname[0] != NUL && !removable(buf->b_ffname)) {
@@ -1378,10 +1380,12 @@ int write_viminfo_marks(FILE *fp_out)
         write_one_mark(fp_out, '^', &buf->b_last_insert);
         write_one_mark(fp_out, '.', &buf->b_last_change);
         /* changelist positions are stored oldest first */
-        for (i = 0; i < buf->b_changelistlen; ++i)
+        for (int i = 0; i < buf->b_changelistlen; ++i) {
           write_one_mark(fp_out, '+', &buf->b_changelist[i]);
-        for (i = 0; i < NMARKS; i++)
+        }
+        for (int i = 0; i < NMARKS; i++) {
           write_one_mark(fp_out, 'a' + i, &buf->b_namedm[i]);
+        }
         count++;
       }
     }
@@ -1443,8 +1447,6 @@ void copy_viminfo_marks(vir_T *virp, FILE *fp_out, int count, int eof, int flags
      */
     str = skipwhite(line + 1);
     str = viminfo_readstring(virp, (int)(str - virp->vir_line), FALSE);
-    if (str == NULL)
-      continue;
     p = str + STRLEN(str);
     while (p != str && (*p == NUL || vim_isspace(*p)))
       p--;
@@ -1528,7 +1530,7 @@ void copy_viminfo_marks(vir_T *virp, FILE *fp_out, int count, int eof, int flags
         fputs((char *)line, fp_out);
     }
     if (load_marks) {
-      FOR_ALL_WINDOWS(wp) {
+      FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
         if (wp->w_buffer == curbuf)
           wp->w_changelistidx = curbuf->b_changelistlen;
       }

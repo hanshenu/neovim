@@ -5,8 +5,10 @@ include(CheckIncludeFiles)
 
 check_type_size("int" SIZEOF_INT)
 check_type_size("long" SIZEOF_LONG)
-check_type_size("time_t" SIZEOF_TIME_T)
+check_type_size("intmax_t" SIZEOF_INTMAX_T)
 check_type_size("off_t" SIZEOF_OFF_T)
+check_type_size("size_t" SIZEOF_SIZE_T)
+check_type_size("long long" SIZEOF_LONG_LONG)
 check_type_size("void *" SIZEOF_VOID_PTR)
 
 check_symbol_exists(_NSGetEnviron crt_externs.h HAVE__NSGETENVIRON)
@@ -43,7 +45,11 @@ check_function_exists(fsync HAVE_FSYNC)
 check_function_exists(getpwent HAVE_GETPWENT)
 check_function_exists(getpwnam HAVE_GETPWNAM)
 check_function_exists(getpwuid HAVE_GETPWUID)
-check_function_exists(iconv HAVE_ICONV)
+
+if(Iconv_FOUND)
+  set(HAVE_ICONV 1)
+endif()
+
 check_function_exists(lstat HAVE_LSTAT)
 if(NOT HAVE_LSTAT)
   # os_unix.c uses lstat.c

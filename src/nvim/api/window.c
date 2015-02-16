@@ -9,6 +9,7 @@
 #include "nvim/cursor.h"
 #include "nvim/window.h"
 #include "nvim/screen.h"
+#include "nvim/move.h"
 #include "nvim/misc2.h"
 
 
@@ -52,12 +53,15 @@ ArrayOf(Integer, 2) window_get_cursor(Window window, Error *err)
 /// @param pos the (row, col) tuple representing the new position
 /// @param[out] err Details of an error that may have occurred
 void window_set_cursor(Window window, ArrayOf(Integer, 2) pos, Error *err)
+  FUNC_ATTR_DEFERRED
 {
   win_T *win = find_window_by_handle(window, err);
 
   if (pos.size != 2 || pos.items[0].type != kObjectTypeInteger ||
       pos.items[1].type != kObjectTypeInteger) {
-    set_api_error("\"pos\" argument must be a [row, col] array", err);
+    api_set_error(err,
+                  Validation,
+                  _("Argument \"pos\" must be a [row, col] array"));
     return;
   }
 
@@ -69,12 +73,12 @@ void window_set_cursor(Window window, ArrayOf(Integer, 2) pos, Error *err)
   int64_t col = pos.items[1].data.integer;
 
   if (row <= 0 || row > win->w_buffer->b_ml.ml_line_count) {
-    set_api_error("cursor position outside buffer", err);
+    api_set_error(err, Validation, _("Cursor position outside buffer"));
     return;
   }
 
   if (col > MAXCOL || col < 0) {
-    set_api_error("Column value outside range", err);
+    api_set_error(err, Validation, _("Column value outside range"));
     return;
   }
 
@@ -83,6 +87,10 @@ void window_set_cursor(Window window, ArrayOf(Integer, 2) pos, Error *err)
   win->w_cursor.coladd = 0;
   // When column is out of range silently correct it.
   check_cursor_col_win(win);
+
+  // make sure cursor is in visible range even if win != curwin
+  update_topline_win(win);
+
   update_screen(VALID);
 }
 
@@ -109,6 +117,7 @@ Integer window_get_height(Window window, Error *err)
 /// @param height the new height in rows
 /// @param[out] err Details of an error that may have occurred
 void window_set_height(Window window, Integer height, Error *err)
+  FUNC_ATTR_DEFERRED
 {
   win_T *win = find_window_by_handle(window, err);
 
@@ -117,7 +126,7 @@ void window_set_height(Window window, Integer height, Error *err)
   }
 
   if (height > INT_MAX || height < INT_MIN) {
-    set_api_error("Height value outside range", err);
+    api_set_error(err, Validation, _("Height value outside range"));
     return;
   }
 
@@ -152,6 +161,7 @@ Integer window_get_width(Window window, Error *err)
 /// @param width the new width in columns
 /// @param[out] err Details of an error that may have occurred
 void window_set_width(Window window, Integer width, Error *err)
+  FUNC_ATTR_DEFERRED
 {
   win_T *win = find_window_by_handle(window, err);
 
@@ -160,7 +170,7 @@ void window_set_width(Window window, Integer width, Error *err)
   }
 
   if (width > INT_MAX || width < INT_MIN) {
-    set_api_error("Width value outside range", err);
+    api_set_error(err, Validation, _("Width value outside range"));
     return;
   }
 
@@ -172,7 +182,7 @@ void window_set_width(Window window, Integer width, Error *err)
   try_end(err);
 }
 
-/// Gets a window variable
+/// Gets a window-scoped (w:) variable
 ///
 /// @param window The window handle
 /// @param name The variable name
@@ -189,7 +199,7 @@ Object window_get_var(Window window, String name, Error *err)
   return dict_get_value(win->w_vars, name, err);
 }
 
-/// Sets a window variable. Passing 'nil' as value deletes the variable.
+/// Sets a window-scoped (w:) variable. 'nil' value deletes the variable.
 ///
 /// @param window The window handle
 /// @param name The variable name
@@ -197,6 +207,7 @@ Object window_get_var(Window window, String name, Error *err)
 /// @param[out] err Details of an error that may have occurred
 /// @return The old value
 Object window_set_var(Window window, String name, Object value, Error *err)
+  FUNC_ATTR_DEFERRED
 {
   win_T *win = find_window_by_handle(window, err);
 
@@ -232,6 +243,7 @@ Object window_get_option(Window window, String name, Error *err)
 /// @param value The option value
 /// @param[out] err Details of an error that may have occurred
 void window_set_option(Window window, String name, Object value, Error *err)
+  FUNC_ATTR_DEFERRED
 {
   win_T *win = find_window_by_handle(window, err);
 
@@ -283,7 +295,7 @@ Tabpage window_get_tabpage(Window window, Error *err)
 /// @return true if the window is valid, false otherwise
 Boolean window_is_valid(Window window)
 {
-  Error stub = {.set = false};
+  Error stub = ERROR_INIT;
   return find_window_by_handle(window, &stub) != NULL;
 }
 

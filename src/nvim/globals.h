@@ -23,6 +23,7 @@
 #endif
 
 #include "nvim/ex_eval.h"
+#include "nvim/iconv.h"
 #include "nvim/mbyte.h"
 #include "nvim/menu.h"
 #include "nvim/syntax_defs.h"
@@ -359,6 +360,16 @@ EXTERN int garbage_collect_at_exit INIT(= FALSE);
 
 /* ID of script being sourced or was sourced to define the current function. */
 EXTERN scid_T current_SID INIT(= 0);
+// Scope information for the code that indirectly triggered the current
+// provider function call
+EXTERN struct caller_scope {
+  scid_T SID;
+  uint8_t *sourcing_name, *autocmd_fname, *autocmd_match; 
+  linenr_T sourcing_lnum;
+  int autocmd_fname_full, autocmd_bufnr;
+  void *funccalp;
+} provider_caller_scope;
+EXTERN int provider_call_nesting INIT(= 0);
 
 /* Magic number used for hashitem "hi_key" value indicating a deleted item.
  * Only the address is used. */
@@ -394,7 +405,8 @@ EXTERN int no_check_timestamps INIT(= 0);       /* Don't check timestamps */
 typedef enum {
   HLF_8 = 0         /* Meta & special keys listed with ":map", text that is
                        displayed different from what it is */
-  , HLF_AT          /* @ and ~ characters at end of screen, characters that
+  , HLF_EOB         // after the last line in the buffer
+  , HLF_AT          /* @ characters at end of screen, characters that
                        don't really exist in the text */
   , HLF_D           /* directories in CTRL-D listing */
   , HLF_E           /* error messages */
@@ -440,10 +452,10 @@ typedef enum {
 
 /* The HL_FLAGS must be in the same order as the HLF_ enums!
  * When changing this also adjust the default for 'highlight'. */
-#define HL_FLAGS {'8', '@', 'd', 'e', 'i', 'l', 'm', 'M', 'n', 'N', 'r', 's', \
-                  'S', 'c', 't', 'v', 'V', 'w', 'W', 'f', 'F', 'A', 'C', 'D', \
-                  'T', '-', '>', 'B', 'P', 'R', 'L', '+', '=', 'x', 'X', '*', \
-                  '#', '_', '!', '.', 'o'}
+#define HL_FLAGS {'8', '~', '@', 'd', 'e', 'i', 'l', 'm', 'M', 'n', 'N', 'r', \
+                  's', 'S', 'c', 't', 'v', 'V', 'w', 'W', 'f', 'F', 'A', 'C', \
+                  'D', 'T', '-', '>', 'B', 'P', 'R', 'L', '+', '=', 'x', 'X', \
+                  '*', '#', '_', '!', '.', 'o'}
 
 EXTERN int highlight_attr[HLF_COUNT];       /* Highl. attr for each context. */
 # define USER_HIGHLIGHT
@@ -454,6 +466,8 @@ EXTERN int highlight_stlnc[9];                  /* On top of user */
 EXTERN int cterm_normal_fg_color INIT(= 0);
 EXTERN int cterm_normal_fg_bold INIT(= 0);
 EXTERN int cterm_normal_bg_color INIT(= 0);
+EXTERN RgbValue normal_fg INIT(= -1);
+EXTERN RgbValue normal_bg INIT(= -1);
 
 EXTERN int autocmd_busy INIT(= FALSE);          /* Is apply_autocmds() busy? */
 EXTERN int autocmd_no_enter INIT(= FALSE);      /* *Enter autocmds disabled */
@@ -468,10 +482,12 @@ EXTERN int keep_filetype INIT(= FALSE);         /* value for did_filetype when
  * which one is preferred, au_new_curbuf is set to it */
 EXTERN buf_T    *au_new_curbuf INIT(= NULL);
 
-// When deleting the buffer and autocmd_busy is TRUE, do not free the buffer
-// but link it in the list starting with au_pending_free_buf, using b_next.
-// Free the buffer when autocmd_busy is set to FALSE.
+// When deleting a buffer/window and autocmd_busy is TRUE, do not free the
+// buffer/window. but link it in the list starting with
+// au_pending_free_buf/ap_pending_free_win, using b_next/w_next.
+// Free the buffer/window when autocmd_busy is being set to FALSE.
 EXTERN buf_T *au_pending_free_buf INIT(= NULL);
+EXTERN win_T *au_pending_free_win INIT(= NULL);
 
 /*
  * Mouse coordinates, set by check_termcode()
@@ -482,14 +498,6 @@ EXTERN bool mouse_past_bottom INIT(= false);    /* mouse below last line */
 EXTERN bool mouse_past_eol INIT(= false);       /* mouse right of line */
 EXTERN int mouse_dragging INIT(= 0);            /* extending Visual area with
                                                    mouse dragging */
-/*
- * When the DEC mouse has been pressed but not yet released we enable
- * automatic querys for the mouse position.
- */
-EXTERN int WantQueryMouse INIT(= FALSE);
-
-
-
 
 /* Value set from 'diffopt'. */
 EXTERN int diff_context INIT(= 6);              /* context for folds */
@@ -518,16 +526,17 @@ EXTERN int updating_screen INIT(= FALSE);
 EXTERN win_T    *firstwin;              /* first window */
 EXTERN win_T    *lastwin;               /* last window */
 EXTERN win_T    *prevwin INIT(= NULL);  /* previous window */
-# define W_NEXT(wp) ((wp)->w_next)
-# define FOR_ALL_WINDOWS(wp) for (win_T *wp = firstwin; wp != NULL; wp = wp->w_next)
 /*
  * When using this macro "break" only breaks out of the inner loop. Use "goto"
  * to break out of the tabpage loop.
  */
 # define FOR_ALL_TAB_WINDOWS(tp, wp) \
-  for ((tp) = first_tabpage; (tp) != NULL; (tp) = (tp)->tp_next) \
-    for ((wp) = ((tp) == curtab) \
-                ? firstwin : (tp)->tp_firstwin; (wp); (wp) = (wp)->w_next)
+  FOR_ALL_TABS(tp) \
+    FOR_ALL_WINDOWS_IN_TAB(wp, tp)
+
+# define FOR_ALL_WINDOWS_IN_TAB(wp, tp) \
+  for (win_T *wp = ((tp) == curtab) \
+              ? firstwin : (tp)->tp_firstwin; wp != NULL; wp = wp->w_next)
 
 EXTERN win_T    *curwin;        /* currently active window */
 
@@ -547,6 +556,9 @@ EXTERN frame_T  *topframe;      /* top of the window frame tree */
 EXTERN tabpage_T    *first_tabpage;
 EXTERN tabpage_T    *curtab;
 EXTERN int redraw_tabline INIT(= FALSE);           /* need to redraw tabline */
+
+// Iterates over all tabs in the tab list
+# define FOR_ALL_TABS(tp) for (tabpage_T *tp = first_tabpage; tp != NULL; tp = tp->tp_next)
 
 /*
  * All buffers are linked in a list. 'firstbuf' points to the first entry,
@@ -587,9 +599,6 @@ EXTERN int exiting INIT(= FALSE);
 /* TRUE when planning to exit Vim.  Might
  * still keep on running if there is a changed
  * buffer. */
-EXTERN int really_exiting INIT(= FALSE);
-/* TRUE when we are sure to exit, e.g., after
- * a deadly signal */
 /* volatile because it is used in signal handler deathtrap(). */
 EXTERN volatile int full_screen INIT(= FALSE);
 /* TRUE when doing full-screen output
@@ -838,7 +847,6 @@ EXTERN char_u   *exe_name;              /* the name of the executable */
 EXTERN int dont_scroll INIT(= FALSE);     /* don't use scrollbars when TRUE */
 #endif
 EXTERN int mapped_ctrl_c INIT(= FALSE);      /* CTRL-C is mapped */
-EXTERN bool ctrl_c_interrupts INIT(= true);  /* CTRL-C sets got_int */
 
 EXTERN cmdmod_T cmdmod;                 /* Ex command modifiers */
 
@@ -852,7 +860,6 @@ EXTERN int cmd_silent INIT(= FALSE);      /* don't echo the command line */
 #define SEA_QUIT        2       /* quit editing the file */
 #define SEA_RECOVER     3       /* recover the file */
 
-#define HAS_SWAP_EXISTS_ACTION
 EXTERN int swap_exists_action INIT(= SEA_NONE);
 /* For dialog when swap file already
  * exists. */
@@ -881,10 +888,6 @@ EXTERN int stop_insert_mode;            /* for ":stopinsert" and 'insertmode' */
 
 EXTERN int KeyTyped;                    /* TRUE if user typed current char */
 EXTERN int KeyStuffed;                  /* TRUE if current char from stuffbuf */
-#ifdef USE_IM_CONTROL
-EXTERN int vgetc_im_active;             /* Input Method was active for last
-                                           character obtained from vgetc() */
-#endif
 EXTERN int maptick INIT(= 0);           /* tick for each non-mapped char */
 
 EXTERN char_u chartab[256];             /* table used in charset.c; See
@@ -990,8 +993,6 @@ extern char *longVersion;
 #ifdef HAVE_PATHDEF
 extern char_u *default_vim_dir;
 extern char_u *default_vimruntime_dir;
-extern char_u *all_cflags;
-extern char_u *all_lflags;
 extern char_u *compiled_user;
 extern char_u *compiled_sys;
 #endif
@@ -1057,6 +1058,10 @@ EXTERN int typebuf_was_filled INIT(= FALSE);      /* received text from client
 
 #if defined(UNIX)
 EXTERN int term_is_xterm INIT(= FALSE);         /* xterm-like 'term' */
+#endif
+
+#if defined(UNIX)
+EXTERN int xterm_conflict_mouse INIT(= FALSE);
 #endif
 
 #ifdef BACKSLASH_IN_FILENAME
@@ -1213,6 +1218,7 @@ EXTERN char_u e_invalpat[] INIT(= N_(
 EXTERN char_u e_bufloaded[] INIT(= N_("E139: File is loaded in another buffer"));
 EXTERN char_u e_notset[] INIT(= N_("E764: Option '%s' is not set"));
 EXTERN char_u e_invalidreg[] INIT(= N_("E850: Invalid register name"));
+EXTERN char_u e_unsupportedoption[] INIT(= N_("E519: Option not supported"));
 
 
 EXTERN char top_bot_msg[] INIT(= N_("search hit TOP, continuing at BOTTOM"));
@@ -1237,6 +1243,8 @@ EXTERN int curr_tmode INIT(= TMODE_COOK); /* contains current terminal mode */
 
 // If a msgpack-rpc channel should be started over stdin/stdout
 EXTERN bool embedded_mode INIT(= false);
+// Using the "abstract_ui" termcap
+EXTERN bool abstract_ui INIT(= false);
 
 /// Used to track the status of external functions.
 /// Currently only used for iconv().

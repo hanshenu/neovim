@@ -29,9 +29,9 @@
 #include "nvim/strings.h"
 #include "nvim/tag.h"
 #include "nvim/tempfile.h"
-#include "nvim/ui.h"
 #include "nvim/window.h"
 #include "nvim/os/os.h"
+#include "nvim/os/input.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -1646,10 +1646,8 @@ static void cs_print_tags_priv(char **matches, char **cntxts, int num_matches)
   char        *fname, *lno, *extra, *tbuf;
   int i, idx, num;
   char        *globalcntx = "GLOBAL";
-  char        *cntxformat = " <<%s>>";
   char        *context;
   char        *cstag_msg = _("Cscope tag: %s");
-  char        *csfmt_str = "%4d %6s  ";
 
   assert (num_matches > 0);
 
@@ -1691,17 +1689,15 @@ static void cs_print_tags_priv(char **matches, char **cntxts, int num_matches)
 
     lno[strlen(lno)-2] = '\0';      /* ignore ;" at the end */
 
+    const char *csfmt_str = "%4d %6s  ";
     /* hopefully 'num' (num of matches) will be less than 10^16 */
     newsize = strlen(csfmt_str) + 16 + strlen(lno);
     if (bufsize < newsize) {
       buf = xrealloc(buf, newsize);
       bufsize = newsize;
     }
-    if (buf != NULL) {
-      /* csfmt_str = "%4d %6s  "; */
-      (void)sprintf(buf, csfmt_str, num, lno);
-      MSG_PUTS_ATTR(buf, hl_attr(HLF_CM));
-    }
+    (void)sprintf(buf, csfmt_str, num, lno);
+    MSG_PUTS_ATTR(buf, hl_attr(HLF_CM));
     MSG_PUTS_LONG_ATTR(cs_pathcomponents(fname), hl_attr(HLF_CM));
 
     /* compute the required space for the context */
@@ -1709,22 +1705,24 @@ static void cs_print_tags_priv(char **matches, char **cntxts, int num_matches)
       context = cntxts[idx];
     else
       context = globalcntx;
-    newsize = strlen(context) + strlen(cntxformat);
+
+    const char *cntxformat = " <<%s>>";
+    // '%s' won't appear in result string, so:
+    // newsize = len(cntxformat) - 2 + len(context) + 1 (for NUL).
+    newsize = strlen(context) + strlen(cntxformat) - 1;
 
     if (bufsize < newsize) {
       buf = xrealloc(buf, newsize);
       bufsize = newsize;
     }
-    if (buf != NULL) {
-      (void)sprintf(buf, cntxformat, context);
+    (void)sprintf(buf, cntxformat, context);
 
-      /* print the context only if it fits on the same line */
-      if (msg_col + (int)strlen(buf) >= (int)Columns)
-        msg_putchar('\n');
-      msg_advance(12);
-      MSG_PUTS_LONG(buf);
+    /* print the context only if it fits on the same line */
+    if (msg_col + (int)strlen(buf) >= (int)Columns)
       msg_putchar('\n');
-    }
+    msg_advance(12);
+    MSG_PUTS_LONG(buf);
+    msg_putchar('\n');
     if (extra != NULL) {
       msg_advance(13);
       MSG_PUTS_LONG(extra);
@@ -1735,7 +1733,7 @@ static void cs_print_tags_priv(char **matches, char **cntxts, int num_matches)
     if (msg_col)
       msg_putchar('\n');
 
-    ui_breakcheck();
+    os_breakcheck();
     if (got_int) {
       got_int = FALSE;          /* don't print any more matches */
       break;

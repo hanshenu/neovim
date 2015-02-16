@@ -223,8 +223,8 @@ example, suppose you want to select a tag that starts with "write_": >
 	:tselect /^write_
 
 The "^" specifies that the tag starts with "write_".  Otherwise it would also
-be found halfway a tag name.  Similarly "$" at the end makes sure the pattern
-matches until the end of a tag.
+be found halfway in a tag name.  Similarly "$" at the end makes sure the
+pattern matches until the end of a tag.
 
 
 A TAGS BROWSER
@@ -263,9 +263,6 @@ doesn't work if the tags file isn't sorted.
 
 The 'taglength' option can be used to tell Vim the number of significant
 characters in a tag.
-
-When you use the SNiFF+ program, you can use the Vim interface to it |sniff|.
-SNiFF+ is a commercial program.
 
 Cscope is a free program.  It does not only find places where an identifier is
 declared, but also where it is used.  See |cscope|.

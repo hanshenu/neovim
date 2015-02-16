@@ -33,11 +33,11 @@ local absolute_executable = nil
 local executable_name = nil
 
 local function assert_file_exists(filepath)
-  eq(false, nil == (lfs.attributes(filepath, 'r')))
+  neq(nil, lfs.attributes(filepath))
 end
 
 local function assert_file_does_not_exist(filepath)
-  eq(true, nil == (lfs.attributes(filepath, 'r')))
+  eq(nil, lfs.attributes(filepath))
 end
 
 describe('fs function', function()
@@ -170,12 +170,20 @@ describe('fs function', function()
 
     it('returns the absolute path when given an executable relative to the current dir', function()
       local old_dir = lfs.currentdir()
+
       lfs.chdir(directory)
       local relative_executable = './' .. executable_name
+
       -- Don't test yet; we need to chdir back first.
       local res = exe(relative_executable)
+
       lfs.chdir(old_dir)
-      eq(absolute_executable, res)
+
+      -- Need to canonicalize the absolute path taken from arg[0], because the
+      -- path may have a symlink in it.  For example, /home is symlinked in
+      -- FreeBSD 10's VM image.
+      local expected = exe(absolute_executable)
+      eq(expected, res)
     end)
   end)
 
@@ -262,7 +270,7 @@ describe('fs function', function()
 
       it('owner of a file may change the group of the file to any group of which that owner is a member', function()
         -- Some systems may not have `id` utility.
-        if (os.execute('id -G &> /dev/null') == 0) then
+        if (os.execute('id -G > /dev/null 2>&1') == 0) then
           local file_gid = lfs.attributes(filename, 'gid')
 
           -- Gets ID of any group of which current user is a member except the

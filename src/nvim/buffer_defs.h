@@ -2,6 +2,7 @@
 #define NVIM_BUFFER_DEFS_H
 
 #include <stdbool.h>
+#include <stdint.h>
 // for FILE
 #include <stdio.h>
 
@@ -11,6 +12,8 @@
 #include "nvim/pos.h"
 // for the number window-local and buffer-local options
 #include "nvim/option_defs.h"
+// for optional iconv support
+#include "nvim/iconv.h"
 // for jump list and tag stack sizes in a buffer and mark types
 #include "nvim/mark_defs.h"
 // for u_header_T
@@ -21,6 +24,8 @@
 #include "nvim/eval_defs.h"
 // for proftime_T
 #include "nvim/profile.h"
+// for String
+#include "nvim/api/private/defs.h"
 
 /*
  * Flags for w_valid.
@@ -74,7 +79,6 @@ typedef struct wininfo_S wininfo_T;
 typedef struct frame_S frame_T;
 typedef int scid_T;                     /* script ID */
 typedef struct file_buffer buf_T;       /* forward declaration */
-typedef struct memfile memfile_T;
 
 // for struct memline (it needs memfile_T)
 #include "nvim/memline_defs.h"
@@ -240,9 +244,9 @@ struct wininfo_S {
   wininfo_T   *wi_prev;         /* previous entry or NULL for first entry */
   win_T       *wi_win;          /* pointer to window that did set wi_fpos */
   pos_T wi_fpos;                /* last cursor position in the file */
-  int wi_optset;                /* TRUE when wi_opt has useful values */
+  bool wi_optset;               /* true when wi_opt has useful values */
   winopt_T wi_opt;              /* local window options */
-  int wi_fold_manual;           /* copy of w_fold_manual */
+  bool wi_fold_manual;          /* copy of w_fold_manual */
   garray_T wi_folds;            /* clone of w_folds */
 };
 
@@ -279,15 +283,6 @@ typedef struct argentry {
 #define ARGCOUNT        (ALIST(curwin)->al_ga.ga_len)
 #define WARGCOUNT(wp)   (ALIST(wp)->al_ga.ga_len)
 
-#ifdef USE_ICONV
-# ifdef HAVE_ICONV_H
-#  include <iconv.h>
-# else
-#    include <errno.h>
-typedef void *iconv_t;
-# endif
-#endif
-
 /*
  * Used for the typeahead buffer: typebuf.
  */
@@ -311,9 +306,7 @@ typedef struct {
   int old_mod_mask;
   buffheader_T save_readbuf1;
   buffheader_T save_readbuf2;
-#ifdef USE_INPUT_BUF
-  char_u              *save_inputbuf;
-#endif
+  String save_inputbuf;
 } tasave_T;
 
 /*
@@ -472,7 +465,7 @@ struct file_buffer {
   int b_nwindows;               /* nr of windows open on this buffer */
 
   int b_flags;                  /* various BF_ flags */
-  int b_closing;                /* buffer is being closed, don't let
+  bool b_closing;               /* buffer is being closed, don't let
                                    autocommands close it too. */
 
   /*
@@ -490,18 +483,18 @@ struct file_buffer {
 
   int b_fnum;                   /* buffer number for this file. */
 
-  int b_changed;                /* 'modified': Set to TRUE if something in the
+  bool b_changed;               /* 'modified': Set to true if something in the
                                    file has been changed and not written out. */
   int b_changedtick;            /* incremented for each change, also for undo */
 
-  int b_saving;                 /* Set to TRUE if we are in the middle of
+  bool b_saving;                /* Set to true if we are in the middle of
                                    saving the buffer. */
 
   /*
    * Changes to a buffer require updating of the display.  To minimize the
    * work, remember changes made and update everything at once.
    */
-  int b_mod_set;                /* TRUE when there are changes since the last
+  bool b_mod_set;               /* true when there are changes since the last
                                    time the display was updated */
   linenr_T b_mod_top;           /* topmost lnum that was changed */
   linenr_T b_mod_bot;           /* lnum below last changed line, AFTER the
@@ -532,7 +525,7 @@ struct file_buffer {
    */
   pos_T b_changelist[JUMPLISTSIZE];
   int b_changelistlen;                  /* number of active entries */
-  int b_new_change;                     /* set by u_savecommon() */
+  bool b_new_change;                    /* set by u_savecommon() */
 
   /*
    * Character table, only used in charset.c for 'iskeyword'
@@ -554,7 +547,7 @@ struct file_buffer {
   pos_T b_op_start_orig;  // used for Insstart_orig
   pos_T b_op_end;
 
-  int b_marks_read;             /* Have we read viminfo marks yet? */
+  bool b_marks_read;            /* Have we read viminfo marks yet? */
 
   /*
    * The following only used in undo.c.
@@ -564,7 +557,7 @@ struct file_buffer {
                                    if b_u_curhead is not NULL */
   u_header_T  *b_u_curhead;     /* pointer to current header */
   int b_u_numhead;              /* current number of headers */
-  int b_u_synced;               /* entry lists are synced */
+  bool b_u_synced;              /* entry lists are synced */
   long b_u_seq_last;            /* last used undo sequence number */
   long b_u_save_nr_last;          /* counter for last file write */
   long b_u_seq_cur;             /* hu_seq of header below which we are now */
@@ -578,7 +571,7 @@ struct file_buffer {
   linenr_T b_u_line_lnum;       /* line number of line in u_line */
   colnr_T b_u_line_colnr;       /* optional column number */
 
-  int b_scanned;                /* ^N/^P have scanned this buffer */
+  bool b_scanned;               /* ^N/^P have scanned this buffer */
 
   /* flags for use of ":lmap" and IM control */
   long b_p_iminsert;            /* input mode for insert */
@@ -586,12 +579,7 @@ struct file_buffer {
 #define B_IMODE_USE_INSERT -1   /*	Use b_p_iminsert value for search */
 #define B_IMODE_NONE 0          /*	Input via none */
 #define B_IMODE_LMAP 1          /*	Input via langmap */
-#ifndef USE_IM_CONTROL
 # define B_IMODE_LAST 1
-#else
-# define B_IMODE_IM 2           /*	Input via input method */
-# define B_IMODE_LAST 2
-#endif
 
   short b_kmap_state;           /* using "lmap" mappings */
 # define KEYMAP_INIT    1       /* 'keymap' was set, call keymap_init() */
@@ -603,12 +591,14 @@ struct file_buffer {
    * They are here because their value depends on the type of file
    * or contents of the file being edited.
    */
-  int b_p_initialized;                  /* set when options initialized */
+  bool b_p_initialized;                 /* set when options initialized */
 
   int b_p_scriptID[BV_COUNT];           /* SIDs for buffer-local options */
 
   int b_p_ai;                   /* 'autoindent' */
   int b_p_ai_nopaste;           /* b_p_ai saved for paste mode */
+  char_u      *b_p_bkc;         ///< 'backupcopy'
+  unsigned int b_bkc_flags;     ///< flags for 'backupcopy'
   int b_p_ci;                   /* 'copyindent' */
   int b_p_bin;                  /* 'binary' */
   int b_p_bomb;                 /* 'bomb' */
@@ -637,12 +627,12 @@ struct file_buffer {
   char_u      *b_p_def;         /* 'define' local value */
   char_u      *b_p_inc;         /* 'include' */
   char_u      *b_p_inex;        /* 'includeexpr' */
-  long_u b_p_inex_flags;        /* flags for 'includeexpr' */
+  uint32_t b_p_inex_flags;      /* flags for 'includeexpr' */
   char_u      *b_p_inde;        /* 'indentexpr' */
-  long_u b_p_inde_flags;        /* flags for 'indentexpr' */
+  uint32_t b_p_inde_flags;        /* flags for 'indentexpr' */
   char_u      *b_p_indk;        /* 'indentkeys' */
   char_u      *b_p_fex;         /* 'formatexpr' */
-  long_u b_p_fex_flags;         /* flags for 'formatexpr' */
+  uint32_t b_p_fex_flags;       /* flags for 'formatexpr' */
   char_u      *b_p_kp;          /* 'keywordprg' */
   int b_p_lisp;                 /* 'lisp' */
   char_u      *b_p_mps;         /* 'matchpairs' */
@@ -739,8 +729,8 @@ struct file_buffer {
    * then set to indicate that a swap file may be opened later.  It is reset
    * if a swap file could not be opened.
    */
-  int b_may_swap;
-  int b_did_warn;               /* Set to 1 if user has been warned on first
+  bool b_may_swap;
+  bool b_did_warn;              /* Set to true if user has been warned on first
                                    change of a read-only file */
 
   /* Two special kinds of buffers:
@@ -748,7 +738,7 @@ struct file_buffer {
    * spell buffer - used for spell info, never displayed and doesn't have a
    *		      file name.
    */
-  int b_help;                   /* TRUE for help file buffer (when set b_p_bt
+  bool b_help;                  /* TRUE for help file buffer (when set b_p_bt
                                    is "help") */
   bool b_spell;                 /* True for a spell file buffer, most fields
                                    are not used!  Use the B_SPELL macro to
@@ -933,7 +923,7 @@ struct window_S {
 
   win_T       *w_prev;              /* link to previous window */
   win_T       *w_next;              /* link to next window */
-  int w_closing;                    /* window is being closed, don't let
+  bool w_closing;                   /* window is being closed, don't let
                                        autocommands close it too. */
 
   frame_T     *w_frame;             /* frame containing this window */
@@ -969,9 +959,9 @@ struct window_S {
                                        e.g. by winrestview() */
   int w_topfill;                    /* number of filler lines above w_topline */
   int w_old_topfill;                /* w_topfill at last redraw */
-  int w_botfill;                    /* TRUE when filler lines are actually
+  bool w_botfill;                   /* true when filler lines are actually
                                        below w_topline (at end of file) */
-  int w_old_botfill;                /* w_botfill at last redraw */
+  bool w_old_botfill;               /* w_botfill at last redraw */
   colnr_T w_leftcol;                /* window column number of the left most
                                        character in the window; used when
                                        'wrap' is off */
@@ -1047,9 +1037,9 @@ struct window_S {
   wline_T     *w_lines;
 
   garray_T w_folds;                 /* array of nested folds */
-  char w_fold_manual;               /* when TRUE: some folds are opened/closed
+  bool w_fold_manual;               /* when true: some folds are opened/closed
                                        manually */
-  char w_foldinvalid;               /* when TRUE: folding needs to be
+  bool w_foldinvalid;               /* when true: folding needs to be
                                        recomputed */
   int w_nrwidth;                    /* width of 'number' and 'relativenumber'
                                        column being used */
@@ -1093,9 +1083,9 @@ struct window_S {
   winopt_T w_allbuf_opt;
 
   /* A few options have local flags for P_INSECURE. */
-  long_u w_p_stl_flags;             /* flags for 'statusline' */
-  long_u w_p_fde_flags;             /* flags for 'foldexpr' */
-  long_u w_p_fdt_flags;             /* flags for 'foldtext' */
+  uint32_t w_p_stl_flags;           /* flags for 'statusline' */
+  uint32_t w_p_fde_flags;           /* flags for 'foldexpr' */
+  uint32_t w_p_fdt_flags;           /* flags for 'foldtext' */
   int         *w_p_cc_cols;         /* array of columns to highlight or NULL */
   int         w_p_brimin;           /* minimum width for breakindent */
   int         w_p_brishift;         /* additional shift for breakindent */

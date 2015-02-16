@@ -62,8 +62,7 @@ static int diff_a_works = MAYBE;
 /// @param buf
 void diff_buf_delete(buf_T *buf)
 {
-  tabpage_T *tp;
-  for (tp = first_tabpage; tp != NULL; tp = tp->tp_next) {
+  FOR_ALL_TABS(tp) {
     int i = diff_buf_idx_tp(buf, tp);
 
     if (i != DB_COUNT) {
@@ -88,7 +87,7 @@ void diff_buf_adjust(win_T *win)
     // When there is no window showing a diff for this buffer, remove
     // it from the diffs.
     bool found_win = false;
-    FOR_ALL_WINDOWS(wp) {
+    FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
       if ((wp->w_buffer == win->w_buffer) && wp->w_p_diff) {
         found_win = true;
       }
@@ -175,8 +174,7 @@ static int diff_buf_idx_tp(buf_T *buf, tabpage_T *tp)
 /// @param buf
 void diff_invalidate(buf_T *buf)
 {
-  tabpage_T *tp;
-  for (tp = first_tabpage; tp != NULL; tp = tp->tp_next) {
+  FOR_ALL_TABS(tp) {
     int i = diff_buf_idx_tp(buf, tp);
     if (i != DB_COUNT) {
       tp->tp_diff_invalid = TRUE;
@@ -197,8 +195,7 @@ void diff_mark_adjust(linenr_T line1, linenr_T line2, long amount,
                       long amount_after)
 {
   // Handle all tab pages that use the current buffer in a diff.
-  tabpage_T *tp;
-  for (tp = first_tabpage; tp != NULL; tp = tp->tp_next) {
+  FOR_ALL_TABS(tp) {
     int idx = diff_buf_idx_tp(curbuf, tp);
     if (idx != DB_COUNT) {
       diff_mark_adjust_tp(tp, idx, line1, line2, amount, amount_after);
@@ -581,25 +578,26 @@ static int diff_check_sanity(tabpage_T *tp, diff_T *dp)
 /// @param dofold Also recompute the folds
 static void diff_redraw(int dofold)
 {
-  FOR_ALL_WINDOWS(wp) {
-    if (wp->w_p_diff) {
-      redraw_win_later(wp, SOME_VALID);
-      if (dofold && foldmethodIsDiff(wp)) {
-        foldUpdateAll(wp);
-      }
+  FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
+    if (!wp->w_p_diff) {
+      continue;
+    }
+    redraw_win_later(wp, SOME_VALID);
+    if (dofold && foldmethodIsDiff(wp)) {
+      foldUpdateAll(wp);
+    }
 
-      /* A change may have made filler lines invalid, need to take care
-       * of that for other windows. */
-      int n = diff_check(wp, wp->w_topline);
+    /* A change may have made filler lines invalid, need to take care
+     * of that for other windows. */
+    int n = diff_check(wp, wp->w_topline);
 
-      if (((wp != curwin) && (wp->w_topfill > 0)) || (n > 0)) {
-        if (wp->w_topfill > n) {
-          wp->w_topfill = (n < 0 ? 0 : n);
-        } else if ((n > 0) && (n > wp->w_topfill)) {
-          wp->w_topfill = n;
-        }
-        check_topfill(wp, FALSE);
+    if (((wp != curwin) && (wp->w_topfill > 0)) || (n > 0)) {
+      if (wp->w_topfill > n) {
+        wp->w_topfill = (n < 0 ? 0 : n);
+      } else if ((n > 0) && (n > wp->w_topfill)) {
+        wp->w_topfill = n;
       }
+      check_topfill(wp, FALSE);
     }
   }
 }
@@ -921,7 +919,7 @@ void ex_diffpatch(exarg_T *eap)
 #endif  // ifdef UNIX
     // Avoid ShellCmdPost stuff
     block_autocmds();
-    (void)call_shell(buf, kShellOptFilter | kShellOptCooked, NULL);
+    (void)call_shell(buf, kShellOptFilter, NULL);
     unblock_autocmds();
   }
 
@@ -1086,7 +1084,7 @@ void diff_win_options(win_T *wp, int addbuf)
   wp->w_p_fdl = 0;
   foldUpdateAll(wp);
 
-  // make sure topline is not halfway a fold
+  // make sure topline is not halfway through a fold
   changed_window_setting_win(wp);
   if (vim_strchr(p_sbo, 'h') == NULL) {
     do_cmdline_cmd((char_u *)"set sbo+=hor");
@@ -1110,7 +1108,7 @@ void ex_diffoff(exarg_T *eap)
   win_T *old_curwin = curwin;
   int diffwin = FALSE;
 
-  FOR_ALL_WINDOWS(wp) {
+  FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
     if (eap->forceit ? wp->w_p_diff : (wp == curwin)) {
       // Set 'diff', 'scrollbind' off and 'wrap' on. If option values
       // were saved in diff_win_options() restore them.
@@ -1162,7 +1160,7 @@ void ex_diffoff(exarg_T *eap)
 
       foldUpdateAll(wp);
 
-      // make sure topline is not halfway a fold
+      // make sure topline is not halfway through a fold
       changed_window_setting_win(wp);
 
       // Note: 'sbo' is not restored, it's a global option.
@@ -1223,11 +1221,11 @@ static void diff_read(int idx_orig, int idx_new, char_u *fname)
     // {first}a{first}[,{last}]
     // {first}[,{last}]d{first}
     p = linebuf;
-    f1 = getdigits(&p);
+    f1 = getdigits_long(&p);
 
     if (*p == ',') {
       ++p;
-      l1 = getdigits(&p);
+      l1 = getdigits_long(&p);
     } else {
       l1 = f1;
     }
@@ -1237,11 +1235,11 @@ static void diff_read(int idx_orig, int idx_new, char_u *fname)
       continue;
     }
     difftype = *p++;
-    f2 = getdigits(&p);
+    f2 = getdigits_long(&p);
 
     if (*p == ',') {
       ++p;
-      l2 = getdigits(&p);
+      l2 = getdigits_long(&p);
     } else {
       l2 = f2;
     }
@@ -1513,8 +1511,8 @@ int diff_check(win_T *wp, linenr_T lnum)
     // If there is no buffer with zero lines then there is no difference
     // any longer.  Happens when making a change (or undo) that removes
     // the difference.  Can't remove the entry here, we might be halfway
-    // updating the window.  Just report the text as unchanged.  Other
-    // windows might still show the change though.
+    // through updating the window.  Just report the text as unchanged.
+    // Other windows might still show the change though.
     if (zero == FALSE) {
       return 0;
     }
@@ -1748,11 +1746,11 @@ void diff_set_topline(win_T *fromwin, win_T *towin)
   }
 
   // safety check (if diff info gets outdated strange things may happen)
-  towin->w_botfill = FALSE;
+  towin->w_botfill = false;
 
   if (towin->w_topline > towin->w_buffer->b_ml.ml_line_count) {
     towin->w_topline = towin->w_buffer->b_ml.ml_line_count;
-    towin->w_botfill = TRUE;
+    towin->w_botfill = true;
   }
 
   if (towin->w_topline < 1) {
@@ -1785,7 +1783,7 @@ int diffopt_changed(void)
       diff_flags_new |= DIFF_FILLER;
     } else if ((STRNCMP(p, "context:", 8) == 0) && VIM_ISDIGIT(p[8])) {
       p += 8;
-      diff_context_new = getdigits(&p);
+      diff_context_new = getdigits_int(&p);
     } else if (STRNCMP(p, "icase", 5) == 0) {
       p += 5;
       diff_flags_new |= DIFF_ICASE;
@@ -1800,7 +1798,7 @@ int diffopt_changed(void)
       diff_flags_new |= DIFF_VERTICAL;
     } else if ((STRNCMP(p, "foldcolumn:", 11) == 0) && VIM_ISDIGIT(p[11])) {
       p += 11;
-      diff_foldcolumn_new = getdigits(&p);
+      diff_foldcolumn_new = getdigits_int(&p);
     }
 
     if ((*p != ',') && (*p != NUL)) {
@@ -1819,8 +1817,7 @@ int diffopt_changed(void)
 
   // If "icase" or "iwhite" was added or removed, need to update the diff.
   if (diff_flags != diff_flags_new) {
-    tabpage_T *tp;
-    for (tp = first_tabpage; tp != NULL; tp = tp->tp_next) {
+    FOR_ALL_TABS(tp) {
       tp->tp_diff_invalid = TRUE;
     }
   }
@@ -2020,17 +2017,24 @@ int diff_infold(win_T *wp, linenr_T lnum)
 }
 
 /// "dp" and "do" commands.
-///
-/// @param put
-void nv_diffgetput(int put)
+void nv_diffgetput(bool put, size_t count)
 {
   exarg_T ea;
-  ea.arg = (char_u *)"";
+  char buf[30];
+
+  if (count == 0) {
+    ea.arg = (char_u *)"";
+  } else {
+    vim_snprintf(buf, 30, "%zu", count);
+    ea.arg = (char_u *)buf;
+  }
+
   if (put) {
     ea.cmdidx = CMD_diffput;
   } else {
     ea.cmdidx = CMD_diffget;
   }
+
   ea.addr_count = 0;
   ea.line1 = curwin->w_cursor.lnum;
   ea.line2 = curwin->w_cursor.lnum;
@@ -2240,7 +2244,7 @@ void ex_diffgetput(exarg_T *eap)
         }
       }
 
-      buf_empty = FALSE;
+      buf_empty = bufempty();
       added = 0;
 
       for (i = 0; i < count; ++i) {
@@ -2362,7 +2366,7 @@ void ex_diffgetput(exarg_T *eap)
 /// @param skip_idx
 static void diff_fold_update(diff_T *dp, int skip_idx)
 {
-  FOR_ALL_WINDOWS(wp) {
+  FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
     for (int i = 0; i < DB_COUNT; ++i) {
       if ((curtab->tp_diffbuf[i] == wp->w_buffer) && (i != skip_idx)) {
         foldUpdate(wp, dp->df_lnum[i], dp->df_lnum[i] + dp->df_count[i]);
@@ -2376,15 +2380,14 @@ static void diff_fold_update(diff_T *dp, int skip_idx)
 /// @param buf The buffer to check.
 ///
 /// @return TRUE if buffer "buf" is in diff-mode.
-int diff_mode_buf(buf_T *buf)
+bool diff_mode_buf(buf_T *buf)
 {
-  tabpage_T *tp;
-  for (tp = first_tabpage; tp != NULL; tp = tp->tp_next) {
+  FOR_ALL_TABS(tp) {
     if (diff_buf_idx_tp(buf, tp) != DB_COUNT) {
-      return TRUE;
+      return true;
     }
   }
-  return FALSE;
+  return false;
 }
 
 /// Move "count" times in direction "dir" to the next diff block.

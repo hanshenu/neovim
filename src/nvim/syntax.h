@@ -5,8 +5,6 @@
 
 #include "nvim/buffer_defs.h"
 
-typedef int guicolor_T;
-
 /*
  * Terminal highlighting attribute bits.
  * Attributes above HL_ALL are used for syntax highlighting.
@@ -39,6 +37,12 @@ typedef int guicolor_T;
 #define HL_TRANS_CONT  0x10000 /* transparent item without contains arg */
 #define HL_CONCEAL     0x20000 /* can be concealed */
 #define HL_CONCEALENDS 0x40000 /* can be concealed */
+
+typedef struct {
+  char *name;
+  RgbValue color;
+} color_name_table_T;
+extern color_name_table_T color_name_table[];
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "syntax.h.generated.h"
