@@ -55,7 +55,6 @@
 #include "nvim/screen.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
-#include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/version.h"
 #include "nvim/window.h"
@@ -95,7 +94,12 @@ typedef struct {
   char_u      *use_ef;                  /* 'errorfile' from -q argument */
 
   int want_full_screen;
-  bool stdout_isatty;                   /* is stdout a terminal? */
+  bool input_isatty;                    // stdin is a terminal
+  bool output_isatty;                   // stdout is a terminal
+  bool err_isatty;                      // stderr is a terminal
+  bool headless;                        // Dont try to start an user interface
+                                        // or read/write to stdio(unless
+                                        // embedding)
   char_u      *term;                    /* specified terminal name */
   int no_swap_file;                     /* "-n" argument used */
   int use_debug_break_level;
@@ -197,16 +201,12 @@ int main(int argc, char **argv)
 
   early_init();
 
-  /*
-   * Check if we have an interactive window.
-   */
+  // Check if we have an interactive window.
   check_and_set_isatty(&params);
 
-  /*
-   * Figure out the way to work from the command name argv[0].
-   * "view" sets "readonlymode", "rvim" sets "restricted", etc.
-   */
-  parse_command_name(&params);
+  // Get the name with which Nvim was invoked, with and without path.
+  set_vim_var_string(VV_PROGPATH, (char_u *)argv[0], -1);
+  set_vim_var_string(VV_PROGNAME, path_tail((char_u *)argv[0]), -1);
 
   /*
    * Process the command line arguments.  File names are put in the global
@@ -231,45 +231,21 @@ int main(int argc, char **argv)
   if (recoverymode && fname == NULL)
     params.want_full_screen = FALSE;
 
-  // term_init() sets up the terminal (window) for use.  This must be
-  // done after resetting full_screen, otherwise it may move the cursor
-  term_init();
-  TIME_MSG("shell init");
+  setbuf(stdout, NULL);
 
   /* This message comes before term inits, but after setting "silent_mode"
    * when the input is not a tty. */
   if (GARGCOUNT > 1 && !silent_mode)
     printf(_("%d files to edit\n"), GARGCOUNT);
 
-  if (params.want_full_screen && !silent_mode) {
-    if (embedded_mode) {
-      // embedded mode implies abstract_ui
-      termcapinit((uint8_t *)"abstract_ui");
-    } else {
-      // set terminal name and get terminal capabilities (will set full_screen)
-      // Do some initialization of the screen
-      termcapinit(params.term);
-    }
-    screen_start();             /* don't know where cursor is now */
-    TIME_MSG("Termcap init");
-  }
-
   event_init();
-
-  if (abstract_ui) {
-    full_screen = true;
-    t_colors = 256;
-    T_CCO = (uint8_t *)"256";
-  } else {
-    // Print a warning if stdout is not a terminal TODO(tarruda): Remove this
-    // check once the new terminal UI is implemented
-    check_tty(&params);
-  }
+  full_screen = true;
+  t_colors = 256;
+  check_tty(&params);
 
   /*
    * Set the default values for the options that use Rows and Columns.
    */
-  ui_get_shellsize();           /* inits Rows and Columns */
   win_init_size();
   /* Set the 'diff' option now, so that it can be checked for in a .vimrc
    * file.  There is no buffer yet though. */
@@ -291,6 +267,23 @@ int main(int argc, char **argv)
 
   /* Set the break level after the terminal is initialized. */
   debug_break_level = params.use_debug_break_level;
+
+  bool reading_input = !params.headless && (params.input_isatty
+      || params.output_isatty || params.err_isatty);
+
+  if (reading_input) {
+    // Its possible that one of the startup commands(arguments, sourced scripts
+    // or plugins) will prompt the user, so start reading from a tty stream
+    // now. 
+    int fd = fileno(stdin);
+    if (!params.input_isatty || params.edit_type == EDIT_STDIN) {
+      // use stderr or stdout since stdin is not a tty and/or could be used to
+      // read the file we'll edit when the "-" argument is given(eg: cat file |
+      // nvim -)
+      fd = params.err_isatty ? fileno(stderr) : fileno(stdout);
+    }
+    input_start_stdin(fd);
+  }
 
   /* Execute --cmd arguments. */
   exe_pre_commands(&params);
@@ -375,43 +368,26 @@ int main(int argc, char **argv)
   if (params.edit_type == EDIT_STDIN && !recoverymode)
     read_stdin();
 
-#if defined(UNIX)
-  /* When switching screens and something caused a message from a vimrc
-   * script, need to output an extra newline on exit. */
-  if ((did_emsg || msg_didout) && *T_TI != NUL)
-    newline_on_exit = TRUE;
-#endif
 
-  /*
-   * When done something that is not allowed or error message call
-   * wait_return.  This must be done before starttermcap(), because it may
-   * switch to another screen. It must be done after settmode(TMODE_RAW),
-   * because we want to react on a single key stroke.
-   * Call settmode and starttermcap here, so the T_KS and T_TI may be
-   * defined by termcapinit and redefined in .exrc.
-   */
-  settmode(TMODE_RAW);
-  TIME_MSG("setting raw mode");
-
-  if (need_wait_return || msg_didany) {
-    wait_return(TRUE);
+  if (reading_input && (need_wait_return || msg_didany)) {
+    // Since at this point there's no UI instance running yet, error messages
+    // would have been printed to stdout. Before starting (which can result in
+    // a alternate screen buffer being shown) we need confirmation that the
+    // user has seen the messages and that is done with a call to wait_return.
     TIME_MSG("waiting for return");
+    wait_return(TRUE);
   }
 
-  starttermcap(); // start termcap if not done by wait_return()
-  TIME_MSG("start termcap");
-  may_req_ambiguous_char_width();
+  if (!params.headless) {
+    // Stop reading from stdin, the UI layer will take over now
+    input_stop_stdin();
+    ui_builtin_start();
+  }
+
   setmouse();  // may start using the mouse
+  ui_reset_scroll_region();  // In case Rows changed
 
-  if (scroll_region) {
-    scroll_region_reset(); // In case Rows changed
-  }
-
-  scroll_start(); // may scroll the screen to the right position
-
-  /*
-   * Don't clear the screen when starting in Ex mode, unless using the GUI.
-   */
+  // Don't clear the screen when starting in Ex mode, unless using the GUI.
   if (exmode_active)
     must_redraw = CLEAR;
   else {
@@ -479,10 +455,6 @@ int main(int argc, char **argv)
   redraw_all_later(NOT_VALID);
   no_wait_return = FALSE;
   starting = 0;
-
-  /* Requesting the termresponse is postponed until here, so that a "-c q"
-   * argument doesn't make it appear in the shell Vim was started from. */
-  may_req_termresponse();
 
   /* start in insert mode */
   if (p_im)
@@ -686,7 +658,6 @@ main_loop (
         curwin->w_valid &= ~VALID_CROW;
       }
       setcursor();
-      cursor_on();
 
       do_redraw = FALSE;
 
@@ -742,7 +713,7 @@ void getout(int exitval)
     exitval += ex_exitval;
 
   /* Position the cursor on the last screen line, below all the text */
-  windgoto((int)Rows - 1, 0);
+  ui_cursor_goto((int)Rows - 1, 0);
 
   /* Optionally print hashtable efficiency. */
   hash_debug_results();
@@ -798,7 +769,7 @@ void getout(int exitval)
   }
 
   /* Position the cursor again, the autocommands may have moved it */
-  windgoto((int)Rows - 1, 0);
+  ui_cursor_goto((int)Rows - 1, 0);
 
 #if defined(USE_ICONV) && defined(DYNAMIC_ICONV)
   iconv_end();
@@ -863,69 +834,8 @@ static void init_locale(void)
   }
   TIME_MSG("locale set");
 }
-
 #endif
 
-/*
- * Check for: [r][g][vi|vim|view][ex[im]]
- * If the executable name starts with "r" we disable shell commands.
- * If the next character is "g" we run the GUI version.
- * If the next characters are "view" we start in readonly mode.
- * If the next characters are "ex" we start in Ex mode.  If it's followed
- * by "im" use improved Ex mode.
- */
-static void parse_command_name(mparm_T *parmp)
-{
-  char_u      *initstr;
-
-  initstr = path_tail((char_u *)parmp->argv[0]);
-
-  set_vim_var_string(VV_PROGNAME, initstr, -1);
-  set_vim_var_string(VV_PROGPATH, (char_u *)parmp->argv[0], -1);
-
-  if (parse_string(&initstr, "editor", 6))
-    return;
-
-  if (parse_char_i(&initstr, 'r'))
-    restricted = TRUE;
-
-  /* "gvim" starts the GUI.  Also accept "Gvim" for MS-Windows. */
-  if (parse_char_i(&initstr, 'g'))
-    main_start_gui();
-
-  if (parse_string(&initstr, "view", 4)) {
-    readonlymode = TRUE;
-    curbuf->b_p_ro = TRUE;
-    p_uc = 10000;                       /* don't update very often */
-  } else {
-    parse_string(&initstr, "vim", 3);   /* consume "vim" if it's there */
-  }
-
-  if (parse_string(&initstr, "ex", 2)) {
-    if (parse_string(&initstr, "im", 2))
-      exmode_active = EXMODE_VIM;
-    else
-      exmode_active = EXMODE_NORMAL;
-  }
-}
-
-static bool parse_char_i(char_u **input, char val)
-{
-  if (TOLOWER_ASC(**input) == val) {
-    *input += 1;  /* or (*input)++ WITH parens */
-    return true;
-  }
-  return false;
-}
-
-static bool parse_string(char_u **input, char *val, int len)
-{
-  if (STRNICMP(*input, val, len) == 0) {
-    *input += len;
-    return true;
-  }
-  return false;
-}
 
 /*
  * Scan the command line arguments.
@@ -965,14 +875,14 @@ static void command_line_scan(mparm_T *parmp)
       c = argv[0][argv_idx++];
       switch (c) {
         case NUL:                 /* "vim -"  read from stdin */
-          /* "ex -" silent mode */
-          if (exmode_active)
+          if (exmode_active) {
+            // "ex -" silent mode
             silent_mode = TRUE;
-          else {
-            if (parmp->edit_type != EDIT_NONE)
+          } else {
+            if (parmp->edit_type != EDIT_NONE) {
               mainerr(ME_TOO_MANY_ARGS, argv[0]);
+            }
             parmp->edit_type = EDIT_STDIN;
-            read_cmd_fd = 2;              /* read from stderr instead of stdin */
           }
           argv_idx = -1;                  /* skip to next argument */
           break;
@@ -1004,8 +914,11 @@ static void command_line_scan(mparm_T *parmp)
             }
 
             mch_exit(0);
+          } else if (STRICMP(argv[0] + argv_idx, "headless") == 0) {
+            parmp->headless = true;
           } else if (STRICMP(argv[0] + argv_idx, "embed") == 0) {
             embedded_mode = true;
+            parmp->headless = true;
           } else if (STRNICMP(argv[0] + argv_idx, "literal", 7) == 0) {
 #if !defined(UNIX)
             parmp->literal = TRUE;
@@ -1172,10 +1085,6 @@ static void command_line_scan(mparm_T *parmp)
                 (char_u *)argv[0] + argv_idx, 0);
             argv_idx = (int)STRLEN(argv[0]);
           }
-          break;
-
-        case 'v':                 /* "-v"  Vi-mode (as if called "vi") */
-          exmode_active = 0;
           break;
 
         case 'w':                 /* "-w{number}"	set window height */
@@ -1418,7 +1327,8 @@ static void init_params(mparm_T *paramp, int argc, char **argv)
   memset(paramp, 0, sizeof(*paramp));
   paramp->argc = argc;
   paramp->argv = argv;
-  paramp->want_full_screen = TRUE;
+  paramp->headless = false;
+  paramp->want_full_screen = true;
   paramp->use_debug_break_level = -1;
   paramp->window_count = -1;
 }
@@ -1439,15 +1349,13 @@ static void init_startuptime(mparm_T *paramp)
   starttime = time(NULL);
 }
 
-/*
- * Check if we have an interactive window.
- */
 static void check_and_set_isatty(mparm_T *paramp)
 {
-  paramp->stdout_isatty = os_isatty(STDOUT_FILENO);
+  paramp->input_isatty = os_isatty(fileno(stdin));
+  paramp->output_isatty = os_isatty(fileno(stdout));
+  paramp->err_isatty = os_isatty(fileno(stderr));
   TIME_MSG("window checked");
 }
-
 /*
  * Get filename from command line, given that there is one.
  */
@@ -1506,7 +1414,7 @@ static void handle_quickfix(mparm_T *paramp)
           paramp->use_ef, OPT_FREE, SID_CARG);
     vim_snprintf((char *)IObuff, IOSIZE, "cfile %s", p_ef);
     if (qf_init(NULL, p_ef, p_efm, TRUE, IObuff) < 0) {
-      out_char('\n');
+      ui_putc('\n');
       mch_exit(3);
     }
     TIME_MSG("reading errorfile");
@@ -1532,26 +1440,36 @@ static void handle_tag(char_u *tagname)
   }
 }
 
-/*
- * Print a warning if stdout is not a terminal.
- * When starting in Ex mode and commands come from a file, set Silent mode.
- */
+// Print a warning if stdout is not a terminal.
+// When starting in Ex mode and commands come from a file, set Silent mode.
 static void check_tty(mparm_T *parmp)
 {
+  if (parmp->headless) {
+    return;
+  }
+
   // is active input a terminal?
-  bool input_isatty = os_isatty(read_cmd_fd);
   if (exmode_active) {
-    if (!input_isatty)
-      silent_mode = TRUE;
-  } else if (parmp->want_full_screen && (!parmp->stdout_isatty || !input_isatty)
-      ) {
-    if (!parmp->stdout_isatty)
+    if (!parmp->input_isatty) {
+      silent_mode = true;
+    }
+  } else if (parmp->want_full_screen && (!parmp->err_isatty
+        && (!parmp->output_isatty || !parmp->input_isatty))) {
+
+    if (!parmp->output_isatty) {
       mch_errmsg(_("Vim: Warning: Output is not to a terminal\n"));
-    if (!input_isatty)
+    }
+
+    if (!parmp->input_isatty) {
       mch_errmsg(_("Vim: Warning: Input is not from a terminal\n"));
-    out_flush();
-    if (scriptin[0] == NULL)
+    }
+
+    ui_flush();
+
+    if (scriptin[0] == NULL) {
       os_delay(2000L, true);
+    }
+
     TIME_MSG("Warning delay");
   }
 }
@@ -1573,13 +1491,6 @@ static void read_stdin(void)
   msg_didany = i;
   TIME_MSG("reading stdin");
   check_swap_exists_action();
-  /*
-   * Close stdin and dup it from stderr.  Required for GPM to work
-   * properly, and for running external commands.
-   * Is there any other system that cannot do this?
-   */
-  close(0);
-  ignored = dup(2);
 }
 
 /*
@@ -2067,13 +1978,12 @@ static void usage(void)
 #if !defined(UNIX)
   mch_msg(_("  --literal             Don't expand wildcards\n"));
 #endif
-  mch_msg(_("  -v                    Vi mode (like \"vi\")\n"));
-  mch_msg(_("  -e                    Ex mode (like \"ex\")\n"));
+  mch_msg(_("  -e                    Ex mode\n"));
   mch_msg(_("  -E                    Improved Ex mode\n"));
-  mch_msg(_("  -s                    Silent (batch) mode (only for \"ex\")\n"));
+  mch_msg(_("  -s                    Silent (batch) mode (only for ex mode)\n"));
   mch_msg(_("  -d                    Diff mode\n"));
-  mch_msg(_("  -R                    Readonly mode (like \"view\")\n"));
-  mch_msg(_("  -Z                    Restricted mode (like \"rvim\")\n"));
+  mch_msg(_("  -R                    Readonly mode\n"));
+  mch_msg(_("  -Z                    Restricted mode\n"));
   mch_msg(_("  -m                    Modifications (writing files) not allowed\n"));
   mch_msg(_("  -M                    Modifications in text not allowed\n"));
   mch_msg(_("  -b                    Binary mode\n"));
@@ -2104,6 +2014,7 @@ static void usage(void)
   mch_msg(_("  -i <nviminfo>         Use <nviminfo> instead of .nviminfo\n"));
   mch_msg(_("  --api-info            Dump API metadata serialized to msgpack and exit\n"));
   mch_msg(_("  --embed               Use stdin/stdout as a msgpack-rpc channel\n"));
+  mch_msg(_("  --headless            Don't start a user interface\n"));
   mch_msg(_("  --version             Print version information and exit\n"));
   mch_msg(_("  -h | --help           Print this help message and exit\n"));
 

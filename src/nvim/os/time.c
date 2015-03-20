@@ -2,13 +2,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
+#include <limits.h>
 
 #include <uv.h>
 
 #include "nvim/os/time.h"
 #include "nvim/os/event.h"
 #include "nvim/vim.h"
-#include "nvim/term.h"
 
 static uv_mutex_t delay_mutex;
 static uv_cond_t delay_cond;

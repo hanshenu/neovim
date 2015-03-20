@@ -48,7 +48,7 @@
 #include "nvim/screen.h"
 #include "nvim/search.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/window.h"
 #include "nvim/os/os.h"
 #include "nvim/os/time.h"
@@ -223,7 +223,7 @@ do_tag (
   /*
    * Don't add a tag to the tagstack if 'tagstack' has been reset.
    */
-  if ((!p_tgst && *tag != NUL)) {
+  if (!p_tgst && *tag != NUL) {
     use_tagstack = FALSE;
     new_tag = TRUE;
   } else {
@@ -881,7 +881,7 @@ do_tag (
         } else
           give_warning(IObuff, ic);
         if (ic && !msg_scrolled && msg_silent == 0) {
-          out_flush();
+          ui_flush();
           os_delay(1000L, true);
         }
       }
@@ -985,7 +985,7 @@ void do_tags(exarg_T *eap)
           ? hl_attr(HLF_D) : 0);
       free(name);
     }
-    out_flush();                    /* show one line at a time */
+    ui_flush();                    /* show one line at a time */
   }
   if (tagstackidx == tagstacklen)       /* idx at top of stack */
     MSG_PUTS("\n>");
@@ -1003,7 +1003,7 @@ static int tag_strnicmp(char_u *s1, char_u *s2, size_t len)
   int i;
 
   while (len > 0) {
-    i = (int)TOUPPER_ASC(*s1) - (int)TOUPPER_ASC(*s2);
+    i = TOUPPER_ASC(*s1) - TOUPPER_ASC(*s2);
     if (i != 0)
       return i;                         /* this character different */
     if (*s1 == NUL)
@@ -1583,7 +1583,7 @@ parse_line:
              */
             i = (int)tagp.tagname[0];
             if (sortic)
-              i = (int)TOUPPER_ASC(tagp.tagname[0]);
+              i = TOUPPER_ASC(tagp.tagname[0]);
             if (i < search_info.low_char || i > search_info.high_char)
               sort_error = TRUE;
 
@@ -1641,7 +1641,8 @@ parse_line:
             /* No match yet and are at the end of the binary search. */
             break;
           } else if (state == TS_SKIP_BACK)   {
-            if (MB_STRNICMP(tagp.tagname, orgpat.head, cmplen) != 0)
+            assert(cmplen >= 0);
+            if (mb_strnicmp(tagp.tagname, orgpat.head, (size_t)cmplen) != 0)
               state = TS_STEP_FORWARD;
             else
               /* Have to skip back more.  Restore the curr_offset
@@ -1649,7 +1650,8 @@ parse_line:
               search_info.curr_offset = search_info.curr_offset_used;
             continue;
           } else if (state == TS_STEP_FORWARD)   {
-            if (MB_STRNICMP(tagp.tagname, orgpat.head, cmplen) != 0) {
+            assert(cmplen >= 0);
+            if (mb_strnicmp(tagp.tagname, orgpat.head, (size_t)cmplen) != 0) {
               if ((off_t)ftell(fp) > search_info.match_offset)
                 break;                  /* past last match */
               else
@@ -1657,7 +1659,8 @@ parse_line:
             }
           } else
           /* skip this match if it can't match */
-          if (MB_STRNICMP(tagp.tagname, orgpat.head, cmplen) != 0)
+          assert(cmplen >= 0);
+          if (mb_strnicmp(tagp.tagname, orgpat.head, (size_t)cmplen) != 0)
             continue;
 
           /*
@@ -1691,7 +1694,8 @@ parse_line:
           match = FALSE;
         else {
           if (orgpat.regmatch.rm_ic) {
-            match = (MB_STRNICMP(tagp.tagname, orgpat.pat, cmplen) == 0);
+            assert(cmplen >= 0);
+            match = mb_strnicmp(tagp.tagname, orgpat.pat, (size_t)cmplen) == 0;
             if (match)
               match_no_ic = (STRNCMP(tagp.tagname, orgpat.pat,
                                  cmplen) == 0);
@@ -2412,9 +2416,7 @@ jumpto_tag (
 
     save_secure = secure;
     secure = 1;
-#ifdef HAVE_SANDBOX
     ++sandbox;
-#endif
     save_magic = p_magic;
     p_magic = FALSE;            /* always execute with 'nomagic' */
     /* Save value of no_hlsearch, jumping to a tag is not a real search */
@@ -2493,7 +2495,7 @@ jumpto_tag (
           if (found == 2 || !save_p_ic) {
             MSG(_("E435: Couldn't find tag, just guessing!"));
             if (!msg_scrolled && msg_silent == 0) {
-              out_flush();
+              ui_flush();
               os_delay(1000L, true);
             }
           }
@@ -2521,9 +2523,7 @@ jumpto_tag (
       wait_return(TRUE);
     secure = save_secure;
     p_magic = save_magic;
-#ifdef HAVE_SANDBOX
     --sandbox;
-#endif
     /* restore no_hlsearch when keeping the old search pattern */
     if (search_options) {
       SET_NO_HLSEARCH(save_no_hlsearch);
@@ -2590,7 +2590,7 @@ static char_u *expand_tag_fname(char_u *fname, char_u *tag_fname, int expand)
   if (expand && mch_has_wildcard(fname)) {
     ExpandInit(&xpc);
     xpc.xp_context = EXPAND_FILES;
-    expanded_fname = ExpandOne(&xpc, (char_u *)fname, NULL,
+    expanded_fname = ExpandOne(&xpc, fname, NULL,
         WILD_LIST_NOTFOUND|WILD_SILENT, WILD_EXPAND_FREE);
     if (expanded_fname != NULL)
       fname = expanded_fname;

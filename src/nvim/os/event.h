@@ -8,7 +8,7 @@
 #include "nvim/os/job_defs.h"
 #include "nvim/os/time.h"
 
-// Poll for events until a condition is true or a timeout has passed
+// Poll for events until a condition or timeout
 #define event_poll_until(timeout, condition)                                 \
   do {                                                                       \
     int remaining = timeout;                                                 \
@@ -31,4 +31,5 @@
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "os/event.h.generated.h"
 #endif
+
 #endif  // NVIM_OS_EVENT_H

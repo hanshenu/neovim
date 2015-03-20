@@ -52,7 +52,6 @@
 #include "nvim/search.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
-#include "nvim/term.h"
 #include "nvim/undo.h"
 #include "nvim/os/os.h"
 
@@ -442,9 +441,6 @@ wingotofile:
   case 'g':
   case Ctrl_G:
     CHECK_CMDWIN
-#ifdef USE_ON_FLY_SCROLL
-    dont_scroll = TRUE;                         /* disallow scrolling here */
-#endif
     ++ no_mapping;
     ++allow_keys;               /* no mapping for xchar, but allow key codes */
     if (xchar == NUL)
@@ -1780,6 +1776,10 @@ static int close_last_window_tabpage(win_T *win, int free_buf, tabpage_T *prev_c
   goto_tabpage_tp(alt_tabpage(), FALSE, TRUE);
   redraw_tabline = TRUE;
 
+  // save index for tabclosed event
+  char_u prev_idx[NUMBUFLEN];
+  sprintf((char *)prev_idx, "%i", tabpage_index(prev_curtab));
+
   /* Safety check: Autocommands may have closed the window when jumping
    * to the other tab page. */
   if (valid_tabpage(prev_curtab) && prev_curtab->tp_firstwin == win) {
@@ -1791,6 +1791,7 @@ static int close_last_window_tabpage(win_T *win, int free_buf, tabpage_T *prev_c
   }
   /* Since goto_tabpage_tp above did not trigger *Enter autocommands, do
    * that now. */
+  apply_autocmds(EVENT_TABCLOSED, prev_idx, prev_idx, FALSE, curbuf);
   apply_autocmds(EVENT_WINENTER, NULL, NULL, FALSE, curbuf);
   apply_autocmds(EVENT_TABENTER, NULL, NULL, FALSE, curbuf);
   if (old_curbuf != curbuf)
@@ -4763,7 +4764,7 @@ void command_height(void)
 
       /* clear the lines added to cmdline */
       if (full_screen)
-        screen_fill((int)(cmdline_row), (int)Rows, 0,
+        screen_fill(cmdline_row, (int)Rows, 0,
             (int)Columns, ' ', ' ', 0);
       msg_row = cmdline_row;
       redraw_cmdline = TRUE;

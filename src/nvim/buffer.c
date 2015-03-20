@@ -68,8 +68,9 @@
 #include "nvim/spell.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/undo.h"
+#include "nvim/version.h"
 #include "nvim/window.h"
 #include "nvim/os/os.h"
 #include "nvim/os/time.h"
@@ -212,7 +213,7 @@ open_buffer (
    * So the modelines have priority over auto commands.
    */
   /* When reading stdin, the buffer contents always needs writing, so set
-   * the changed flag.  Unless in readonly mode: "ls | gview -".
+   * the changed flag.  Unless in readonly mode: "ls | nvim -R -".
    * When interrupted and 'cpoptions' contains 'i' set changed flag. */
   if ((got_int && vim_strchr(p_cpo, CPO_INTMOD) != NULL)
       || modified_was_set               /* ":set modified" used in autocmd */
@@ -724,7 +725,7 @@ do_bufdel (
        */
       if (bnr == curbuf->b_fnum)
         do_current = bnr;
-      else if (do_buffer(command, DOBUF_FIRST, FORWARD, (int)bnr,
+      else if (do_buffer(command, DOBUF_FIRST, FORWARD, bnr,
                    forceit) == OK)
         ++deleted;
 
@@ -1420,7 +1421,7 @@ buflist_new (
     if (top_file_num < 0) {             /* wrap around (may cause duplicates) */
       EMSG(_("W14: Warning: List of file names overflow"));
       if (emsg_silent == 0) {
-        out_flush();
+        ui_flush();
         os_delay(3000L, true);          /* make sure it is noticed */
       }
       top_file_num = 1;
@@ -2159,7 +2160,7 @@ void buflist_list(exarg_T *eap)
         buf == curbuf ? (int64_t)curwin->w_cursor.lnum
                       : (int64_t)buflist_findlnum(buf));
     msg_outtrans(IObuff);
-    out_flush();            /* output one line at a time */
+    ui_flush();            /* output one line at a time */
     os_breakcheck();
   }
 }
@@ -2745,7 +2746,8 @@ static int ti_change(char_u *str, char_u **last)
  */
 void resettitle(void)
 {
-  mch_settitle(lasttitle, lasticon);
+  ui_set_title((char *)lasttitle);
+  ui_set_icon((char *)lasticon);
 }
 
 # if defined(EXITFREE)
@@ -4031,8 +4033,6 @@ void do_modelines(int flags)
       nmlines = 0;
   --entered;
 }
-
-#include "nvim/version_defs.h"            /* for version number */
 
 /*
  * chk_modeline() - check a single line for a mode string

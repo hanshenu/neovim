@@ -7,6 +7,7 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 # Prefer our bundled versions of dependencies.
 set(DEPS_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/.deps/usr" CACHE PATH "Path prefix for finding dependencies")
 list(INSERT CMAKE_PREFIX_PATH 0 ${DEPS_PREFIX})
+set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:${DEPS_PREFIX}/lib/pkgconfig")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   # CMake tries to treat /sw and /opt/local as extension of the system path, but
@@ -148,6 +149,10 @@ if(CMAKE_COMPILER_IS_GNUCXX AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,--no-undefined")
 endif()
 
+if(CMAKE_COMPILER_IS_GNUCXX AND CMAKE_SYSTEM_NAME STREQUAL "SunOS")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-undefined -lsocket")
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
   # Required for luajit.
   set(CMAKE_EXE_LINKER_FLAGS
@@ -181,6 +186,18 @@ include_directories(SYSTEM ${MSGPACK_INCLUDE_DIRS})
 
 find_package(LuaJit REQUIRED)
 include_directories(SYSTEM ${LUAJIT_INCLUDE_DIRS})
+
+option(LIBUNIBILIUM_USE_STATIC "Use static libunibilium" ON)
+find_package(LibUnibilium REQUIRED)
+include_directories(SYSTEM ${LIBUNIBILIUM_INCLUDE_DIRS})
+
+option(LIBTERMKEY_USE_STATIC "Use static libtermkey" ON)
+find_package(LibTermkey REQUIRED)
+include_directories(SYSTEM ${LIBTERMKEY_INCLUDE_DIRS})
+
+option(LIBVTERM_USE_STATIC "Use static libvterm" ON)
+find_package(LibVterm REQUIRED)
+include_directories(SYSTEM ${LIBVTERM_INCLUDE_DIRS})
 
 find_package(LibIntl)
 if(LibIntl_FOUND)
@@ -268,6 +285,8 @@ get_compile_flags(NVIM_VERSION_CFLAGS)
 
 add_subdirectory(test/includes)
 add_subdirectory(config)
+add_subdirectory(test/functional/job) # compile pty test program
+
 
 # Setup some test-related bits.  We do this after going down the tree because we
 # need some of the targets.
@@ -308,5 +327,5 @@ if(BUSTED_PRG)
       -DBUILD_DIR=${CMAKE_BINARY_DIR}
       -DTEST_TYPE=functional
       -P ${PROJECT_SOURCE_DIR}/cmake/RunTests.cmake
-    DEPENDS nvim)
+    DEPENDS nvim tty-test)
 endif()

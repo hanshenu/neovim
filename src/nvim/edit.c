@@ -54,7 +54,6 @@
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
 #include "nvim/tag.h"
-#include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/mouse.h"
 #include "nvim/undo.h"
@@ -269,13 +268,11 @@ edit (
   // set Insstart_orig to Insstart
   update_Insstart_orig = true;
 
-#ifdef HAVE_SANDBOX
-  /* Don't allow inserting in the sandbox. */
+  // Don't allow inserting in the sandbox.
   if (sandbox != 0) {
     EMSG(_(e_sandbox));
     return FALSE;
   }
-#endif
   /* Don't allow changes in the buffer while editing the cmdline.  The
    * caller of getcmdline() may get confused. */
   if (textlock != 0) {
@@ -548,7 +545,7 @@ edit (
       mincol = curwin->w_wcol;
       validate_cursor_col();
 
-      if ((int)curwin->w_wcol < mincol - curbuf->b_p_ts
+      if (curwin->w_wcol < mincol - curbuf->b_p_ts
           && curwin->w_wrow == curwin->w_winrow
           + curwin->w_height - 1 - p_so
           && (curwin->w_cursor.lnum != curwin->w_topline
@@ -585,9 +582,6 @@ edit (
     old_topline = curwin->w_topline;
     old_topfill = curwin->w_topfill;
 
-#ifdef USE_ON_FLY_SCROLL
-    dont_scroll = FALSE;                /* allow scrolling here */
-#endif
 
     /*
      * Get a character for Insert mode.  Ignore K_IGNORE.
@@ -1406,7 +1400,6 @@ void display_dollar(colnr_T col)
   if (!redrawing())
     return;
 
-  cursor_off();
   save_col = curwin->w_cursor.col;
   curwin->w_cursor.col = col;
   if (has_mbyte) {
@@ -1755,7 +1748,7 @@ static int has_compl_option(int dict_opt)
     if (emsg_silent == 0) {
       vim_beep();
       setcursor();
-      out_flush();
+      ui_flush();
       os_delay(2000L, false);
     }
     return FALSE;
@@ -2243,7 +2236,7 @@ void set_completion(colnr_T startcol, list_T *list)
 
   compl_curr_match = compl_first_match;
   ins_complete(Ctrl_N);
-  out_flush();
+  ui_flush();
 }
 
 
@@ -4469,7 +4462,7 @@ static int ins_complete(int c)
     edit_submode_highl = HLF_COUNT;
     showmode();
     edit_submode_extra = NULL;
-    out_flush();
+    ui_flush();
   }
 
   compl_shown_match = compl_curr_match;
@@ -4704,9 +4697,6 @@ int get_literal(void)
   if (got_int)
     return Ctrl_C;
 
-#ifdef USE_ON_FLY_SCROLL
-  dont_scroll = TRUE;           /* disallow scrolling here */
-#endif
   ++no_mapping;                 /* don't map the next key hits */
   cc = 0;
   i = 0;
@@ -4902,7 +4892,7 @@ insertchar (
     return;
 
   /* Check whether this character should end a comment. */
-  if (did_ai && (int)c == end_comment_pending) {
+  if (did_ai && c == end_comment_pending) {
     char_u  *line;
     char_u lead_end[COM_MAX_LEN];           /* end-comment string */
     int middle_len, end_len;
@@ -4965,9 +4955,6 @@ insertchar (
    * Don't do this when there an InsertCharPre autocommand is defined,
    * because we need to fire the event for every character.
    */
-#ifdef USE_ON_FLY_SCROLL
-  dont_scroll = FALSE;                  /* allow scrolling here */
-#endif
 
   if (       !ISSPECIAL(c)
              && (!has_mbyte || (*mb_char2len)(c) == 1)
@@ -6594,9 +6581,10 @@ int in_cinkeys(int keytyped, int when, int line_is_empty)
             for (s = line + curwin->w_cursor.col; s > line; --s)
               if (!vim_iswordc(s[-1]))
                 break;
+          assert(p >= look && (uintmax_t)(p - look) <= SIZE_MAX);
           if (s + (p - look) <= line + curwin->w_cursor.col
               && (icase
-                  ? MB_STRNICMP(s, look, p - look)
+                  ? mb_strnicmp(s, look, (size_t)(p - look))
                   : STRNCMP(s, look, p - look)) == 0)
             match = TRUE;
         } else
@@ -6605,10 +6593,11 @@ int in_cinkeys(int keytyped, int when, int line_is_empty)
                                        && TOLOWER_LOC(keytyped) ==
                                        TOLOWER_LOC((int)p[-1]))) {
           line = get_cursor_pos_ptr();
+          assert(p >= look && (uintmax_t)(p - look) <= SIZE_MAX);
           if ((curwin->w_cursor.col == (colnr_T)(p - look)
                || !vim_iswordc(line[-(p - look) - 1]))
               && (icase
-                  ? MB_STRNICMP(line - (p - look), look, p - look)
+                  ? mb_strnicmp(line - (p - look), look, (size_t)(p - look))
                   : STRNCMP(line - (p - look), look, p - look))
               == 0)
             match = TRUE;
@@ -6730,9 +6719,6 @@ static void ins_reg(void)
     add_to_showcmd_c(Ctrl_R);
   }
 
-#ifdef USE_ON_FLY_SCROLL
-  dont_scroll = TRUE;           /* disallow scrolling here */
-#endif
 
   /*
    * Don't map the register name. This also prevents the mode message to be
@@ -8057,9 +8043,6 @@ static int ins_digraph(void)
     add_to_showcmd_c(Ctrl_K);
   }
 
-#ifdef USE_ON_FLY_SCROLL
-  dont_scroll = TRUE;           /* disallow scrolling here */
-#endif
 
   /* don't map the digraph chars. This also prevents the
    * mode message to be deleted when ESC is hit */

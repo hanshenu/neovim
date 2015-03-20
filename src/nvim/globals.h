@@ -376,7 +376,6 @@ EXTERN int provider_call_nesting INIT(= 0);
 EXTERN char_u hash_removed;
 
 
-EXTERN int scroll_region INIT(= FALSE);      /* term supports scroll region */
 EXTERN int t_colors INIT(= 0);              /* int value of T_CCO */
 
 /*
@@ -458,11 +457,8 @@ typedef enum {
                   '*', '#', '_', '!', '.', 'o'}
 
 EXTERN int highlight_attr[HLF_COUNT];       /* Highl. attr for each context. */
-# define USER_HIGHLIGHT
-#ifdef USER_HIGHLIGHT
 EXTERN int highlight_user[9];                   /* User[1-9] attributes */
 EXTERN int highlight_stlnc[9];                  /* On top of user */
-#endif
 EXTERN int cterm_normal_fg_color INIT(= 0);
 EXTERN int cterm_normal_fg_bold INIT(= 0);
 EXTERN int cterm_normal_bg_color INIT(= 0);
@@ -605,7 +601,7 @@ EXTERN volatile int full_screen INIT(= FALSE);
  * otherwise only writing some messages */
 
 EXTERN int restricted INIT(= FALSE);
-/* TRUE when started as "rvim" */
+// TRUE when started in restricted mode (-Z)
 EXTERN int secure INIT(= FALSE);
 /* non-zero when only "safe" commands are
  * allowed, e.g. when sourcing .exrc or .vimrc
@@ -623,7 +619,6 @@ EXTERN int allbuf_lock INIT(= 0);
  * changed, no buffer can be deleted and
  * current directory can't be changed.
  * Used for SwapExists et al. */
-# define HAVE_SANDBOX
 EXTERN int sandbox INIT(= 0);
 /* Non-zero when evaluating an expression in a
  * "sandbox".  Several things are not allowed
@@ -839,13 +834,6 @@ EXTERN int ctrl_x_mode INIT(= 0);       /* Which Ctrl-X mode are we in? */
 
 EXTERN int no_abbr INIT(= TRUE);        /* TRUE when no abbreviations loaded */
 
-#ifdef USE_EXE_NAME
-EXTERN char_u   *exe_name;              /* the name of the executable */
-#endif
-
-#ifdef USE_ON_FLY_SCROLL
-EXTERN int dont_scroll INIT(= FALSE);     /* don't use scrollbars when TRUE */
-#endif
 EXTERN int mapped_ctrl_c INIT(= FALSE);      /* CTRL-C is mapped */
 
 EXTERN cmdmod_T cmdmod;                 /* Ex command modifiers */
@@ -904,13 +892,10 @@ EXTERN char_u   *use_viminfo INIT(= NULL);  /* name of viminfo file to use */
 EXTERN FILE     *scriptin[NSCRIPT];         /* streams to read script from */
 EXTERN int curscript INIT(= 0);             /* index in scriptin[] */
 EXTERN FILE     *scriptout INIT(= NULL);    /* stream to write script to */
-EXTERN int read_cmd_fd INIT(= 0);           /* fd to read commands from */
 
 /* volatile because it is used in signal handler catch_sigint(). */
 EXTERN volatile int got_int INIT(= FALSE);    /* set to TRUE when interrupt
                                                  signal occurred */
-EXTERN int termcap_active INIT(= FALSE);        /* set by starttermcap() */
-EXTERN int cur_tmode INIT(= TMODE_COOK);        /* input terminal mode */
 EXTERN int bangredo INIT(= FALSE);          /* set to TRUE with ! command */
 EXTERN int searchcmdlen;                    /* length of previous search cmd */
 EXTERN int reg_do_extmatch INIT(= 0);       /* Used when compiling regexp:
@@ -981,10 +966,6 @@ EXTERN int wild_menu_showing INIT(= 0);
 
 
 EXTERN char breakat_flags[256];         /* which characters are in 'breakat' */
-
-/* these are in version.c */
-extern char *Version;
-extern char *longVersion;
 
 /*
  * Some file names are stored in pathdef.c, which is generated from the
@@ -1131,6 +1112,7 @@ EXTERN char_u e_isadir2[] INIT(= N_("E17: \"%s\" is a directory"));
 EXTERN char_u e_invjob[] INIT(= N_("E900: Invalid job id"));
 EXTERN char_u e_jobtblfull[] INIT(= N_("E901: Job table is full"));
 EXTERN char_u e_jobexe[] INIT(= N_("E902: \"%s\" is not an executable"));
+EXTERN char_u e_jobnotpty[] INIT(= N_("E904: Job is not connected to a pty"));
 EXTERN char_u e_libcall[] INIT(= N_("E364: Library call failed for \"%s()\""));
 EXTERN char_u e_markinval[] INIT(= N_("E19: Mark has invalid line number"));
 EXTERN char_u e_marknotset[] INIT(= N_("E20: Mark not set"));
@@ -1183,9 +1165,7 @@ EXTERN char_u e_readonlyvar[] INIT(= N_(
 EXTERN char_u e_readonlysbx[] INIT(= N_(
         "E794: Cannot set variable in the sandbox: \"%s\""));
 EXTERN char_u e_readerrf[] INIT(= N_("E47: Error while reading errorfile"));
-#ifdef HAVE_SANDBOX
 EXTERN char_u e_sandbox[] INIT(= N_("E48: Not allowed in sandbox"));
-#endif
 EXTERN char_u e_secure[] INIT(= N_("E523: Not allowed here"));
 EXTERN char_u e_screenmode[] INIT(= N_(
         "E359: Screen mode setting not supported"));
@@ -1237,14 +1217,8 @@ EXTERN FILE *time_fd INIT(= NULL);  /* where to write startup timing */
 EXTERN int ignored;
 EXTERN char *ignoredp;
 
-/* Temporarily moved these static variables to assist in migrating from
- * os_unix.c */
-EXTERN int curr_tmode INIT(= TMODE_COOK); /* contains current terminal mode */
-
 // If a msgpack-rpc channel should be started over stdin/stdout
 EXTERN bool embedded_mode INIT(= false);
-// Using the "abstract_ui" termcap
-EXTERN bool abstract_ui INIT(= false);
 
 /// Used to track the status of external functions.
 /// Currently only used for iconv().

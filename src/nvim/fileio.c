@@ -53,7 +53,7 @@
 #include "nvim/sha256.h"
 #include "nvim/strings.h"
 #include "nvim/tempfile.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/types.h"
 #include "nvim/undo.h"
 #include "nvim/window.h"
@@ -221,7 +221,7 @@ void filemess(buf_T *buf, char_u *name, char_u *s, int attr)
   /* may truncate the message to avoid a hit-return prompt */
   msg_outtrans_attr(msg_may_trunc(FALSE, IObuff), attr);
   msg_clr_eos();
-  out_flush();
+  ui_flush();
   msg_scrolled_ign = FALSE;
 }
 
@@ -1235,7 +1235,6 @@ retry:
       if (size <= 0)
         break;
 
-
 # ifdef USE_ICONV
       if (iconv_fd != (iconv_t)-1) {
         /*
@@ -1294,16 +1293,6 @@ retry:
       }
 # endif
 
-# ifdef MACOS_CONVERT
-      if (fio_flags & FIO_MACROMAN) {
-        /*
-         * Conversion from Apple MacRoman char encoding to UTF-8 or
-         * latin1.  This is in os_mac_conv.c.
-         */
-        if (macroman2enc(ptr, &size, real_size) == FAIL)
-          goto rewind_retry;
-      } else
-# endif
       if (fio_flags != 0) {
         int u8c;
         char_u  *dest;
@@ -1360,7 +1349,7 @@ retry:
          * conv_rest[]. */
         if (tail != NULL) {
           conv_restlen = (int)((ptr + size) - tail);
-          memmove(conv_rest, (char_u *)tail, conv_restlen);
+          memmove(conv_rest, tail, conv_restlen);
           size -= conv_restlen;
         }
 
@@ -1740,14 +1729,14 @@ failed:
     }
   }
 
-  if (set_options)
-    save_file_ff(curbuf);               /* remember the current file format */
-
-  /* If editing a new file: set 'fenc' for the current buffer.
-   * Also for ":read ++edit file". */
-  if (set_options)
+  if (set_options) {
+    // Remember the current file format.
+    save_file_ff(curbuf);
+    // If editing a new file: set 'fenc' for the current buffer.
+    // Also for ":read ++edit file". 
     set_string_option_direct((char_u *)"fenc", -1, fenc,
-        OPT_FREE|OPT_LOCAL, 0);
+        OPT_FREE | OPT_LOCAL, 0);
+  }
   if (fenc_alloced)
     free(fenc);
 # ifdef USE_ICONV
@@ -1813,7 +1802,6 @@ failed:
      * Switch on raw mode now and clear the screen.
      */
     if (read_stdin) {
-      starttermcap();
       screenclear();
     }
 
@@ -3496,7 +3484,7 @@ restore_backup:
          * know we got the message. */
         if (got_int) {
           MSG(_(e_interr));
-          out_flush();
+          ui_flush();
         }
         if ((fd = os_open((char *)backup, O_RDONLY, 0)) >= 0) {
           if ((write_info.bw_fd = os_open((char *)fname,
@@ -3894,7 +3882,7 @@ static void msg_add_eol(void)
 static int check_mtime(buf_T *buf, FileInfo *file_info)
 {
   if (buf->b_mtime_read != 0
-      && time_differs((long)file_info->stat.st_mtim.tv_sec,
+      && time_differs(file_info->stat.st_mtim.tv_sec,
                       buf->b_mtime_read)) {
     msg_scroll = TRUE;              /* don't overwrite messages here */
     msg_silent = 0;                 /* must give this prompt */
@@ -4029,38 +4017,6 @@ static int buf_write_bytes(struct bw_info *ip)
         len = (int)(p - ip->bw_conv_buf);
       }
     }
-
-
-# ifdef MACOS_CONVERT
-    else if (flags & FIO_MACROMAN) {
-      /*
-       * Convert UTF-8 or latin1 to Apple MacRoman.
-       */
-      char_u      *from;
-      size_t fromlen;
-
-      if (ip->bw_restlen > 0) {
-        /* Need to concatenate the remainder of the previous call and
-         * the bytes of the current call.  Use the end of the
-         * conversion buffer for this. */
-        fromlen = len + ip->bw_restlen;
-        from = ip->bw_conv_buf + ip->bw_conv_buflen - fromlen;
-        memmove(from, ip->bw_rest, (size_t)ip->bw_restlen);
-        memmove(from + ip->bw_restlen, buf, (size_t)len);
-      } else {
-        from = buf;
-        fromlen = len;
-      }
-
-      if (enc2macroman(from, fromlen,
-              ip->bw_conv_buf, &len, ip->bw_conv_buflen,
-              ip->bw_rest, &ip->bw_restlen) == FAIL) {
-        ip->bw_conv_error = TRUE;
-        return FAIL;
-      }
-      buf = ip->bw_conv_buf;
-    }
-# endif
 
 # ifdef USE_ICONV
     if (ip->bw_iconv_fd != (iconv_t)-1) {
@@ -4726,7 +4682,7 @@ check_timestamps (
     if (need_wait_return && didit == 2) {
       /* make sure msg isn't overwritten */
       msg_puts((char_u *)"\n");
-      out_flush();
+      ui_flush();
     }
   }
   return didit;
@@ -4816,7 +4772,7 @@ buf_check_timestamp (
   if (!(buf->b_flags & BF_NOTEDITED)
       && buf->b_mtime != 0
       && (!(file_info_ok = os_fileinfo((char *)buf->b_ffname, &file_info))
-          || time_differs((long)file_info.stat.st_mtim.tv_sec, buf->b_mtime)
+          || time_differs(file_info.stat.st_mtim.tv_sec, buf->b_mtime)
           || (int)file_info.stat.st_mode != buf->b_orig_mode
           )) {
     retval = 1;
@@ -4954,7 +4910,7 @@ buf_check_timestamp (
         msg_clr_eos();
         (void)msg_end();
         if (emsg_silent == 0) {
-          out_flush();
+          ui_flush();
           /* give the user some time to think about it */
           os_delay(1000L, true);
 
@@ -5128,7 +5084,7 @@ void buf_reload(buf_T *buf, int orig_mode)
 void buf_store_file_info(buf_T *buf, FileInfo *file_info)
   FUNC_ATTR_NONNULL_ALL
 {
-  buf->b_mtime = (long)file_info->stat.st_mtim.tv_sec;
+  buf->b_mtime = file_info->stat.st_mtim.tv_sec;
   buf->b_orig_size = os_fileinfo_size(file_info);
   buf->b_orig_mode = (int)file_info->stat.st_mode;
 }
@@ -5246,8 +5202,11 @@ static struct event_name {
   {"StdinReadPre",    EVENT_STDINREADPRE},
   {"SwapExists",      EVENT_SWAPEXISTS},
   {"Syntax",          EVENT_SYNTAX},
+  {"TabClosed",       EVENT_TABCLOSED},
   {"TabEnter",        EVENT_TABENTER},
   {"TabLeave",        EVENT_TABLEAVE},
+  {"TabNew",          EVENT_TABNEW},
+  {"TabNewEntered",   EVENT_TABNEWENTERED},
   {"TermChanged",     EVENT_TERMCHANGED},
   {"TermResponse",    EVENT_TERMRESPONSE},
   {"TextChanged",     EVENT_TEXTCHANGED},
@@ -5919,19 +5878,20 @@ static int do_autocmd_event(event_T event, char_u *pat, int nested, char_u *cmd,
     is_buflocal = FALSE;
     buflocal_nr = 0;
 
-    if (patlen >= 7 && STRNCMP(pat, "<buffer", 7) == 0
+    if (patlen >= 8 && STRNCMP(pat, "<buffer", 7) == 0
         && pat[patlen - 1] == '>') {
-      /* Error will be printed only for addition. printing and removing
-       * will proceed silently. */
+      /* "<buffer...>": Error will be printed only for addition.
+       * printing and removing will proceed silently. */
       is_buflocal = TRUE;
       if (patlen == 8)
+        /* "<buffer>" */
         buflocal_nr = curbuf->b_fnum;
       else if (patlen > 9 && pat[7] == '=') {
-        /* <buffer=abuf> */
-        if (patlen == 13 && STRNICMP(pat, "<buffer=abuf>", 13))
+        if (patlen == 13 && STRNICMP(pat, "<buffer=abuf>", 13) == 0)
+          /* "<buffer=abuf>" */
           buflocal_nr = autocmd_bufnr;
-        /* <buffer=123> */
         else if (skipdigits(pat + 8) == pat + patlen - 1)
+          /* "<buffer=123>" */
           buflocal_nr = atoi((char *)pat + 8);
       }
     }
@@ -6471,12 +6431,6 @@ int has_cmdundefined(void)
   return first_autopat[(int)EVENT_CMDUNDEFINED] != NULL;
 }
 
-/// @returns true when there is an FuncUndefined autocommand defined.
-int has_funcundefined(void)
-{
-  return first_autopat[(int)EVENT_FUNCUNDEFINED] != NULL;
-}
-
 static int 
 apply_autocmds_group (
     event_T event,
@@ -6639,7 +6593,8 @@ apply_autocmds_group (
         || event == EVENT_QUICKFIXCMDPRE
         || event == EVENT_COLORSCHEME
         || event == EVENT_QUICKFIXCMDPOST
-        || event == EVENT_JOBACTIVITY)
+        || event == EVENT_JOBACTIVITY
+        || event == EVENT_TABCLOSED)
       fname = vim_strsave(fname);
     else
       fname = FullName_save(fname, FALSE);

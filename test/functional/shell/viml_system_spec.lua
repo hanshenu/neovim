@@ -60,7 +60,7 @@ describe('system()', function()
     it('`echo` and waits for its return', function()
       feed(':call system("echo")<cr>')
       screen:expect([[
-        ^                                                    |
+        ^                                                     |
         ~                                                    |
         ~                                                    |
         ~                                                    |
@@ -77,31 +77,27 @@ describe('system()', function()
       ]])
     end)
 
-    it('`yes` and is directly interrupted with CTRL-C', function()
-      feed(':call system("yes")<cr><c-c>')
-      screen:expect([[
-        ^                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        Type  :quit<Enter>  to exit Vim                      |
-      ]])
-    end)
-
-    it('`yes` and is a little bit later interrupted with CTRL-C', function()
+    it('`yes` and is interrupted with CTRL-C', function()
       feed(':call system("yes")<cr>')
+      screen:expect([[
+                                                             |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        :call system("yes")                                  |
+      ]])
       feed('<c-c>')
       screen:expect([[
-        ^                                                    |
+        ^                                                     |
         ~                                                    |
         ~                                                    |
         ~                                                    |
@@ -191,7 +187,7 @@ describe('system()', function()
   if xclip then
     describe("with a program that doesn't close stdout", function()
       it('will exit properly after passing input', function()
-        eq(nil, eval([[system('xclip -i -selection clipboard', 'clip-data')]]))
+        eq('', eval([[system('xclip -i -selection clipboard', 'clip-data')]]))
         eq('clip-data', eval([[system('xclip -o -selection clipboard')]]))
       end)
     end)
@@ -230,7 +226,7 @@ describe('systemlist()', function()
     it('`echo` and waits for its return', function()
       feed(':call systemlist("echo")<cr>')
       screen:expect([[
-        ^                                                    |
+        ^                                                     |
         ~                                                    |
         ~                                                    |
         ~                                                    |
@@ -247,31 +243,27 @@ describe('systemlist()', function()
       ]])
     end)
 
-    it('`yes` and is directly interrupted with CTRL-C', function()
-      feed(':call systemlist("yes | xargs")<cr><c-c>')
-      screen:expect([[
-        ^                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        ~                                                    |
-        Type  :quit<Enter>  to exit Vim                      |
-      ]])
-    end)
-
-    it('`yes` and is a little bit later interrupted with CTRL-C', function()
+    it('`yes` and is interrupted with CTRL-C', function()
       feed(':call systemlist("yes | xargs")<cr>')
+      screen:expect([[
+                                                             |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        ~                                                    |
+        :call systemlist("yes | xargs")                      |
+      ]])
       feed('<c-c>')
       screen:expect([[
-        ^                                                    |
+        ^                                                     |
         ~                                                    |
         ~                                                    |
         ~                                                    |

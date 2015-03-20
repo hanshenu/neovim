@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <string.h>
+#include <limits.h>
 
 #include "nvim/vim.h"
 #include "nvim/ascii.h"
@@ -37,7 +38,7 @@
 #include "nvim/quickfix.h"
 #include "nvim/search.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/os/os.h"
 #include "nvim/os/input.h"
 
@@ -604,7 +605,8 @@ static char_u *mark_line(pos_T *mp, int lead_len)
 
   if (mp->lnum == 0 || mp->lnum > curbuf->b_ml.ml_line_count)
     return vim_strsave((char_u *)"-invalid-");
-  s = vim_strnsave(skipwhite(ml_get(mp->lnum)), (int)Columns);
+  assert(Columns >= 0 && (size_t)Columns <= SIZE_MAX);
+  s = vim_strnsave(skipwhite(ml_get(mp->lnum)), (size_t)Columns);
 
   /* Truncate the line to fit it in the window */
   len = 0;
@@ -700,7 +702,7 @@ show_one_mark (
           free(name);
       }
     }
-    out_flush();                    /* show one line at a time */
+    ui_flush();                    /* show one line at a time */
   }
 }
 
@@ -812,7 +814,7 @@ void ex_jumps(exarg_T *eap)
       free(name);
       os_breakcheck();
     }
-    out_flush();
+    ui_flush();
   }
   if (curwin->w_jumplistidx == curwin->w_jumplistlen)
     MSG_PUTS("\n>");
@@ -846,7 +848,7 @@ void ex_changes(exarg_T *eap)
       free(name);
       os_breakcheck();
     }
-    out_flush();
+    ui_flush();
   }
   if (curwin->w_changelistidx == curbuf->b_changelistlen)
     MSG_PUTS("\n>");
@@ -1033,10 +1035,11 @@ void mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
     if (posp->lnum == lnum && posp->col >= mincol) \
     { \
       posp->lnum += lnum_amount; \
+      assert(col_amount > INT_MIN && col_amount <= INT_MAX); \
       if (col_amount < 0 && posp->col <= (colnr_T)-col_amount) \
         posp->col = 0; \
       else \
-        posp->col += col_amount; \
+        posp->col += (colnr_T)col_amount; \
     } \
   }
 
@@ -1329,7 +1332,7 @@ int removable(char_u *name)
     copy_option_part(&p, part, 51, ", ");
     if (part[0] == 'r') {
       n = STRLEN(part + 1);
-      if (MB_STRNICMP(part + 1, name, n) == 0) {
+      if (mb_strnicmp(part + 1, name, n) == 0) {
         retval = TRUE;
         break;
       }
@@ -1499,12 +1502,13 @@ void copy_viminfo_marks(vir_T *virp, FILE *fp_out, int count, int eof, int flags
       if (load_marks) {
         if (line[1] != NUL) {
           int64_t lnum_64;
-          unsigned u;
+          unsigned int u;
           sscanf((char *)line + 2, "%" SCNd64 "%u", &lnum_64, &u);
           // safely downcast to linenr_T (long); remove when linenr_T refactored
           assert(lnum_64 <= LONG_MAX); 
           pos.lnum = (linenr_T)lnum_64;
-          pos.col = u;
+          assert(u <= INT_MAX);
+          pos.col = (colnr_T)u;
           switch (line[1]) {
           case '"': curbuf->b_last_cursor = pos; break;
           case '^': curbuf->b_last_insert = pos; break;

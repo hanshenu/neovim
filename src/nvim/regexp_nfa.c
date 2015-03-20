@@ -8,6 +8,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <limits.h>
 
 #include "nvim/ascii.h"
 #include "nvim/misc2.h"
@@ -5321,7 +5322,7 @@ static int nfa_regmatch(nfa_regprog_T *prog, nfa_state_T *start, regsubs_T *subm
         if (ireg_icombine && len == 0) {
           /* If \Z was present, then ignore composing characters.
            * When ignoring the base character this always matches. */
-          if (len == 0 && sta->c != curc)
+          if (sta->c != curc)
             result = FAIL;
           else
             result = OK;

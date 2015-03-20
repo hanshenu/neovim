@@ -39,7 +39,7 @@
 #include "nvim/normal.h"
 #include "nvim/screen.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/mouse.h"
 #include "nvim/os/os.h"
 #include "nvim/os/input.h"
@@ -325,7 +325,6 @@ void trunc_string(char_u *s, char_u *buf, int room, int buflen)
 }
 
 /*
- * Automatic prototype generation does not understand this function.
  * Note: Caller of smgs() and smsg_attr() must check the resulting string is
  * shorter than IOSIZE!!!
  */
@@ -581,11 +580,42 @@ int emsg2(char_u *s, char_u *a1)
   return emsg3(s, a1, NULL);
 }
 
-/* emsg3() and emsgn() are in misc2.c to avoid warnings for the prototypes. */
-
 void emsg_invreg(int name)
 {
   EMSG2(_("E354: Invalid register name: '%s'"), transchar(name));
+}
+
+/// Print an error message with one or two "%s" and one or two string arguments.
+int emsg3(char_u *s, char_u *a1, char_u *a2)
+{
+  if (emsg_not_now()) {
+    return TRUE;                // no error messages at the moment
+  }
+
+  vim_snprintf((char *)IObuff, IOSIZE, (char *)s, a1, a2);
+  return emsg(IObuff);
+}
+
+/// Print an error message with one "%" PRId64 and one (int64_t) argument.
+int emsgn(char_u *s, int64_t n)
+{
+  if (emsg_not_now()) {
+    return TRUE;                // no error messages at the moment
+  }
+
+  vim_snprintf((char *)IObuff, IOSIZE, (char *)s, n);
+  return emsg(IObuff);
+}
+
+/// Print an error message with one "%" PRIu64 and one (uint64_t) argument.
+int emsgu(char_u *s, uint64_t n)
+{
+  if (emsg_not_now()) {
+    return TRUE;                // no error messages at the moment
+  }
+
+  vim_snprintf((char *)IObuff, IOSIZE, (char *)s, n);
+  return emsg(IObuff);
 }
 
 /*
@@ -794,9 +824,6 @@ void wait_return(int redraw)
 
     State = HITRETURN;
     setmouse();
-#ifdef USE_ON_FLY_SCROLL
-    dont_scroll = TRUE;                 /* disallow scrolling here */
-#endif
     /* Avoid the sequence that the user types ":" at the hit-return prompt
      * to start an Ex command, but the file-changed dialog gets in the
      * way. */
@@ -915,15 +942,6 @@ void wait_return(int redraw)
   State = oldState;                 /* restore State before set_shellsize */
   setmouse();
   msg_check();
-
-#if defined(UNIX)
-  /*
-   * When switching screens, we need to output an extra newline on exit.
-   */
-  if (swapping_screen() && !termcap_active)
-    newline_on_exit = TRUE;
-#endif
-
   need_wait_return = FALSE;
   did_wait_return = TRUE;
   emsg_on_display = FALSE;      /* can delete error message now */
@@ -936,11 +954,9 @@ void wait_return(int redraw)
   }
 
   if (tmpState == SETWSIZE) {       /* got resize event while in vgetc() */
-    starttermcap();                 /* start termcap before redrawing */
-    shell_resized();
+    ui_refresh();
   } else if (!skip_redraw
              && (redraw == TRUE || (msg_scrolled != 0 && redraw != -1))) {
-    starttermcap();                 /* start termcap before redrawing */
     redraw_later(VALID);
   }
 }
@@ -979,17 +995,6 @@ void set_keep_msg(char_u *s, int attr)
 }
 
 /*
- * If there currently is a message being displayed, set "keep_msg" to it, so
- * that it will be displayed again after redraw.
- */
-void set_keep_msg_from_hist(void)
-{
-  if (keep_msg == NULL && last_msg_hist != NULL && msg_scrolled == 0
-      && (State & NORMAL))
-    set_keep_msg(last_msg_hist->msg, last_msg_hist->attr);
-}
-
-/*
  * Prepare for outputting characters in the command line.
  */
 void msg_start(void)
@@ -1023,7 +1028,6 @@ void msg_start(void)
     msg_starthere();
   if (msg_silent == 0) {
     msg_didout = FALSE;                     /* no output on current line yet */
-    cursor_off();
   }
 
   /* when redirecting, may need to start a new line. */
@@ -1779,20 +1783,7 @@ static void msg_puts_display(char_u *str, int maxlen, int attr, int recurse)
 static void msg_scroll_up(void)
 {
   /* scrolling up always works */
-  screen_del_lines(0, 0, 1, (int)Rows, TRUE, NULL);
-
-  if (!can_clear((char_u *)" ")) {
-    /* Scrolling up doesn't result in the right background.  Set the
-     * background here.  It's not efficient, but avoids that we have to do
-     * it all over the code. */
-    screen_fill((int)Rows - 1, (int)Rows, 0, (int)Columns, ' ', ' ', 0);
-
-    /* Also clear the last char of the last but one line if it was not
-     * cleared before to avoid a scroll-up. */
-    if (ScreenAttrs[LineOffset[Rows - 2] + Columns - 1] == (sattr_T)-1)
-      screen_fill((int)Rows - 2, (int)Rows - 1,
-          (int)Columns - 1, (int)Columns, ' ', ' ', 0);
-  }
+  screen_del_lines(0, 0, 1, (int)Rows, NULL);
 }
 
 /*
@@ -1975,19 +1966,11 @@ static void t_puts(int *t_col, char_u *t_s, char_u *s, int attr)
   }
 }
 
-/*
- * Returns TRUE when messages should be printed with mch_errmsg().
- * This is used when there is no valid screen, so we can see error messages.
- * If termcap is not active, we may be writing in an alternate console
- * window, cursor positioning may not work correctly (window size may be
- * different, e.g. for Win32 console) or we just don't know where the
- * cursor is.
- */
+// Returns TRUE when messages should be printed to stdout/stderr, which
+// happens when no UIs are attached and nvim is not being embedded
 int msg_use_printf(void)
 {
-  return !msg_check_screen()
-         || (swapping_screen() && !termcap_active)
-  ;
+  return !embedded_mode && !ui_active();
 }
 
 /*
@@ -2363,7 +2346,7 @@ void repeat_message(void)
     display_confirm_msg();      /* display ":confirm" message again */
     msg_row = Rows - 1;
   } else if (State == EXTERNCMD) {
-    windgoto(msg_row, msg_col);     /* put cursor back */
+    ui_cursor_goto(msg_row, msg_col);     /* put cursor back */
   } else if (State == HITRETURN || State == SETWSIZE) {
     if (msg_row == Rows - 1) {
       /* Avoid drawing the "hit-enter" prompt below the previous one,
@@ -2376,24 +2359,6 @@ void repeat_message(void)
     hit_return_msg();
     msg_row = Rows - 1;
   }
-}
-
-/*
- * msg_check_screen - check if the screen is initialized.
- * Also check msg_row and msg_col, if they are too big it may cause a crash.
- * While starting the GUI the terminal codes will be set for the GUI, but the
- * output goes to the terminal.  Don't use the terminal codes then.
- */
-static int msg_check_screen(void)
-{
-  if (!full_screen || !screen_valid(FALSE))
-    return FALSE;
-
-  if (msg_row >= Rows)
-    msg_row = Rows - 1;
-  if (msg_col >= Columns)
-    msg_col = Columns - 1;
-  return TRUE;
 }
 
 /*
@@ -2413,22 +2378,12 @@ void msg_clr_eos(void)
  */
 void msg_clr_eos_force(void)
 {
-  if (msg_use_printf()) {
-    if (full_screen) {          /* only when termcap codes are valid */
-      if (*T_CD)
-        out_str(T_CD);          /* clear to end of display */
-      else if (*T_CE)
-        out_str(T_CE);          /* clear to end of line */
-    }
+  if (cmdmsg_rl) {
+    screen_fill(msg_row, msg_row + 1, 0, msg_col + 1, ' ', ' ', 0);
+    screen_fill(msg_row + 1, (int)Rows, 0, (int)Columns, ' ', ' ', 0);
   } else {
-    if (cmdmsg_rl) {
-      screen_fill(msg_row, msg_row + 1, 0, msg_col + 1, ' ', ' ', 0);
-      screen_fill(msg_row + 1, (int)Rows, 0, (int)Columns, ' ', ' ', 0);
-    } else {
-      screen_fill(msg_row, msg_row + 1, msg_col, (int)Columns,
-          ' ', ' ', 0);
-      screen_fill(msg_row + 1, (int)Rows, 0, (int)Columns, ' ', ' ', 0);
-    }
+    screen_fill(msg_row, msg_row + 1, msg_col, (int)Columns, ' ', ' ', 0);
+    screen_fill(msg_row + 1, (int)Rows, 0, (int)Columns, ' ', ' ', 0);
   }
 }
 
@@ -2459,7 +2414,7 @@ int msg_end(void)
     wait_return(FALSE);
     return FALSE;
   }
-  out_flush();
+  ui_flush();
   return TRUE;
 }
 
@@ -2880,7 +2835,7 @@ static char_u * console_dialog_alloc(const char_u *message,
 static char_u *msg_show_console_dialog(char_u *message, char_u *buttons, int dfltbutton)
   FUNC_ATTR_NONNULL_RET
 {
-  bool has_hotkey[HAS_HOTKEY_LEN];
+  bool has_hotkey[HAS_HOTKEY_LEN] = {false};
   char_u *hotk = console_dialog_alloc(message, buttons, has_hotkey);
 
   copy_hotkeys_and_msg(message, buttons, dfltbutton, has_hotkey, hotk);
@@ -3126,9 +3081,6 @@ static double tv_float(typval_T *tvs, int *idxp)
  * "typval_T".  When the latter is not used it must be NULL.
  */
 
-/* When generating prototypes all of this is skipped, cproto doesn't
- * understand this. */
-
 /* Like vim_vsnprintf() but append to the string. */
 int vim_snprintf_add(char *str, size_t str_m, char *fmt, ...)
 {
@@ -3161,6 +3113,7 @@ int vim_snprintf(char *str, size_t str_m, char *fmt, ...)
 int vim_vsnprintf(char *str, size_t str_m, char *fmt, va_list ap, typval_T *tvs)
 {
   size_t str_l = 0;
+  bool str_avail = str_l < str_m;
   char        *p = fmt;
   int arg_idx = 1;
 
@@ -3168,15 +3121,15 @@ int vim_vsnprintf(char *str, size_t str_m, char *fmt, va_list ap, typval_T *tvs)
     p = "";
   while (*p != NUL) {
     if (*p != '%') {
-      size_t n = xstrchrnul(p + 1, '%') - p;
-
       /* Copy up to the next '%' or NUL without any changes. */
-      if (str_l < str_m) {
+      size_t n = (size_t)(xstrchrnul(p + 1, '%') - p);
+      if (str_avail) {
         size_t avail = str_m - str_l;
-
-        memmove(str + str_l, p, n > avail ? avail : n);
+        memmove(str + str_l, p, MIN(n, avail));
+        str_avail = n < avail;
       }
       p += n;
+      assert(n <= SIZE_MAX - str_l);
       str_l += n;
     } else {
       size_t min_field_width = 0, precision = 0;
@@ -3726,17 +3679,16 @@ int vim_vsnprintf(char *str, size_t str_m, char *fmt, va_list ap, typval_T *tvs)
        * this does not include the zero padding in case of numerical
        * conversions*/
       if (!justify_left) {
-        /* left padding with blank or zero */
-        int pn = (int)(min_field_width - (str_arg_l + number_of_zeros_to_pad));
-
-        if (pn > 0) {
-          if (str_l < str_m) {
+        assert(str_arg_l <= SIZE_MAX - number_of_zeros_to_pad);
+        if (min_field_width > str_arg_l + number_of_zeros_to_pad) {
+          /* left padding with blank or zero */
+          size_t pn = min_field_width - (str_arg_l + number_of_zeros_to_pad);
+          if (str_avail) {
             size_t avail = str_m - str_l;
-
-            memset(str + str_l, zero_padding ? '0' : ' ',
-                (size_t)pn > avail ? avail
-                : (size_t)pn);
+            memset(str + str_l, zero_padding ? '0' : ' ', MIN(pn, avail));
+            str_avail = pn < avail;
           }
+          assert(pn <= SIZE_MAX - str_l);
           str_l += pn;
         }
       }
@@ -3748,67 +3700,58 @@ int vim_vsnprintf(char *str, size_t str_m, char *fmt, va_list ap, typval_T *tvs)
         * force it to be copied later in its entirety    */
         zero_padding_insertion_ind = 0;
       } else {
-        /* insert first part of numerics (sign or '0x') before zero
-         * padding */
-        int zn = (int)zero_padding_insertion_ind;
-
-        if (zn > 0) {
-          if (str_l < str_m) {
+        /* insert first part of numerics (sign or '0x') before zero padding */
+        if (zero_padding_insertion_ind > 0) {
+          size_t zn = zero_padding_insertion_ind;
+          if (str_avail) {
             size_t avail = str_m - str_l;
-
-            memmove(str + str_l, str_arg,
-                (size_t)zn > avail ? avail
-                : (size_t)zn);
+            memmove(str + str_l, str_arg, MIN(zn, avail));
+            str_avail = zn < avail;
           }
+          assert(zn <= SIZE_MAX - str_l);
           str_l += zn;
         }
 
-        /* insert zero padding as requested by the precision or min
-         * field width */
-        zn = (int)number_of_zeros_to_pad;
-        if (zn > 0) {
-          if (str_l < str_m) {
-            size_t avail = str_m-str_l;
-
-            memset(str + str_l, '0',
-                (size_t)zn > avail ? avail
-                : (size_t)zn);
+        /* insert zero padding as requested by precision or min field width */
+        if (number_of_zeros_to_pad > 0) {
+          size_t zn = number_of_zeros_to_pad;
+          if (str_avail) {
+            size_t avail = str_m - str_l;
+            memset(str + str_l, '0', MIN(zn, avail));
+            str_avail = zn < avail;
           }
+          assert(zn <= SIZE_MAX - str_l);
           str_l += zn;
         }
       }
 
       /* insert formatted string
        * (or as-is conversion specifier for unknown conversions) */
-      {
-        int sn = (int)(str_arg_l - zero_padding_insertion_ind);
-
-        if (sn > 0) {
-          if (str_l < str_m) {
-            size_t avail = str_m - str_l;
-
-            memmove(str + str_l,
-                str_arg + zero_padding_insertion_ind,
-                (size_t)sn > avail ? avail : (size_t)sn);
-          }
-          str_l += sn;
+      if (str_arg_l > zero_padding_insertion_ind) {
+        size_t sn = str_arg_l - zero_padding_insertion_ind;
+        if (str_avail) {
+          size_t avail = str_m - str_l;
+          memmove(str + str_l,
+                  str_arg + zero_padding_insertion_ind,
+                  MIN(sn, avail));
+          str_avail = sn < avail;
         }
+        assert(sn <= SIZE_MAX - str_l);
+        str_l += sn;
       }
 
       /* insert right padding */
       if (justify_left) {
-        /* right blank padding to the field width */
-        int pn = (int)(min_field_width
-                       - (str_arg_l + number_of_zeros_to_pad));
-
-        if (pn > 0) {
-          if (str_l < str_m) {
+        assert(str_arg_l <= SIZE_MAX - number_of_zeros_to_pad);
+        if (min_field_width > str_arg_l + number_of_zeros_to_pad) {
+          /* right blank padding to the field width */
+          size_t pn = min_field_width - (str_arg_l + number_of_zeros_to_pad);
+          if (str_avail) {
             size_t avail = str_m - str_l;
-
-            memset(str + str_l, ' ',
-                (size_t)pn > avail ? avail
-                : (size_t)pn);
+            memset(str + str_l, ' ', MIN(pn, avail));
+            str_avail = pn < avail;
           }
+          assert(pn <= SIZE_MAX - str_l);
           str_l += pn;
         }
       }

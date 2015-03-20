@@ -1,24 +1,8 @@
-/*
- * VIM - Vi IMproved	by Bram Moolenaar
- *
- * Do ":help uganda"  in Vim to read copying and usage conditions.
- * Do ":help credits" in Vim to see a list of people who contributed.
- * See README.txt for an overview of the Vim source code.
- */
-
-/*
- * ui.c: functions that handle the user interface.
- * 1. Keyboard input stuff, and a bit of windowing stuff.  These are called
- *    before the machine specific stuff (mch_*) so that we can call the GUI
- *    stuff instead if the GUI is running.
- * 2. Clipboard stuff.
- * 3. Input buffer stuff.
- */
-
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
+#include <limits.h>
 
 #include "nvim/vim.h"
 #include "nvim/ui.h"
@@ -44,8 +28,8 @@
 #include "nvim/os/signal.h"
 #include "nvim/screen.h"
 #include "nvim/syntax.h"
-#include "nvim/term.h"
 #include "nvim/window.h"
+#include "nvim/tui/tui.h"
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "ui.c.generated.h"
@@ -55,12 +39,13 @@
 
 static UI *uis[MAX_UI_COUNT];
 static size_t ui_count = 0;
-static int row, col;
+static int row = 0, col = 0;
 static struct {
   int top, bot, left, right;
 } sr;
-static int current_highlight_mask = 0;
-static bool cursor_enabled = true;
+static int current_attr_code = 0;
+static bool pending_cursor_update = false;
+static int busy = 0;
 static int height, width;
 
 // This set of macros allow us to use UI_CALL to invoke any function on
@@ -71,6 +56,7 @@ static int height, width;
 // works.
 #define UI_CALL(...)                                              \
   do {                                                            \
+    flush_cursor_update();                                        \
     for (size_t i = 0; i < ui_count; i++) {                       \
       UI *ui = uis[i];                                            \
       UI_CALL_HELPER(CNT(__VA_ARGS__), __VA_ARGS__);              \
@@ -80,38 +66,17 @@ static int height, width;
 #define SELECT_NTH(a1, a2, a3, a4, a5, a6, ...) a6
 #define UI_CALL_HELPER(c, ...) UI_CALL_HELPER2(c, __VA_ARGS__)
 #define UI_CALL_HELPER2(c, ...) UI_CALL_##c(__VA_ARGS__)
-#define UI_CALL_MORE(method, ...) ui->method(ui, __VA_ARGS__)
-#define UI_CALL_ZERO(method) ui->method(ui)
+#define UI_CALL_MORE(method, ...) if (ui->method) ui->method(ui, __VA_ARGS__)
+#define UI_CALL_ZERO(method) if (ui->method) ui->method(ui)
 
-void ui_write(uint8_t *s, int len)
+void ui_builtin_start(void)
 {
-  if (silent_mode && !p_verbose) {
-    // Don't output anything in silent mode ("ex -s") unless 'verbose' set
-    return;
-  }
+  tui_start();
+}
 
-  if (abstract_ui) {
-    parse_abstract_ui_codes(s, len);
-    return;
-  }
-
-  if (!len) {
-    return;
-  }
-
-  char_u  *tofree = NULL;
-
-  if (output_conv.vc_type != CONV_NONE) {
-    /* Convert characters from 'encoding' to 'termencoding'. */
-    tofree = string_convert(&output_conv, s, &len);
-    if (tofree != NULL)
-      s = tofree;
-  }
-
-  term_write(s, len);
-
-  if (output_conv.vc_type != CONV_NONE)
-    free(tofree);
+void ui_builtin_stop(void)
+{
+  UI_CALL(stop);
 }
 
 bool ui_rgb_attached(void)
@@ -124,19 +89,15 @@ bool ui_rgb_attached(void)
   return false;
 }
 
-/*
- * If the machine has job control, use it to suspend the program,
- * otherwise fake it by starting a new shell.
- * When running the GUI iconify the window.
- */
+bool ui_active(void)
+{
+  return ui_count != 0;
+}
+
 void ui_suspend(void)
 {
-  if (abstract_ui) {
-    UI_CALL(suspend);
-    UI_CALL(flush);
-  } else {
-    mch_suspend();
-  }
+  UI_CALL(suspend);
+  UI_CALL(flush);
 }
 
 void ui_set_title(char *title)
@@ -151,47 +112,15 @@ void ui_set_icon(char *icon)
   UI_CALL(flush);
 }
 
-/*
- * Try to get the current Vim shell size.  Put the result in Rows and Columns.
- * Use the new sizes as defaults for 'columns' and 'lines'.
- * Return OK when size could be determined, FAIL otherwise.
- */
-int ui_get_shellsize(void)
-{
-  if (abstract_ui) {
-    return FAIL;
-  }
-
-  int retval;
-
-  retval = mch_get_shellsize();
-
-  check_shellsize();
-
-  /* adjust the default for 'lines' and 'columns' */
-  if (retval == OK) {
-    set_number_default("lines", Rows);
-    set_number_default("columns", Columns);
-  }
-  return retval;
-}
-
-/*
- * May update the shape of the cursor.
- */
+// May update the shape of the cursor.
 void ui_cursor_shape(void)
 {
-  if (abstract_ui) {
-    ui_change_mode();
-  } else {
-    term_cursor_shape();
-    conceal_check_cursur_line();
-  }
+  ui_change_mode();
 }
 
 void ui_refresh(void)
 {
-  if (!ui_count) {
+  if (!ui_active()) {
     return;
   }
 
@@ -203,7 +132,8 @@ void ui_refresh(void)
     height = ui->height < height ? ui->height : height;
   }
 
-  screen_resize(width, height, true);
+  row = col = 0;
+  screen_resize(width, height);
 }
 
 void ui_resize(int new_width, int new_height)
@@ -221,63 +151,28 @@ void ui_resize(int new_width, int new_height)
   UI_CALL(resize, width, height);
 }
 
-void ui_cursor_on(void)
+void ui_busy_start(void)
 {
-  if (!cursor_enabled) {
-    UI_CALL(cursor_on);
-    cursor_enabled = true;
+  if (!(busy++)) {
+    UI_CALL(busy_start);
   }
 }
 
-void ui_cursor_off(void)
+void ui_busy_stop(void)
 {
-  if (full_screen) {
-    if (cursor_enabled) {
-      UI_CALL(cursor_off);
-    }
-    cursor_enabled = false;
+  if (!(--busy)) {
+    UI_CALL(busy_stop);
   }
 }
 
 void ui_mouse_on(void)
 {
-  if (abstract_ui) {
-    UI_CALL(mouse_on);
-  } else {
-    mch_setmouse(true);
-  }
+  UI_CALL(mouse_on);
 }
 
 void ui_mouse_off(void)
 {
-  if (abstract_ui) {
-    UI_CALL(mouse_off);
-  } else {
-    mch_setmouse(false);
-  }
-}
-
-// Notify that the current mode has changed. Can be used to change cursor
-// shape, for example.
-void ui_change_mode(void)
-{
-  static int showing_insert_mode = MAYBE;
-
-  if (!full_screen)
-    return;
-
-  if (State & INSERT) {
-    if (showing_insert_mode != TRUE) {
-      UI_CALL(insert_mode);
-    }
-    showing_insert_mode = TRUE;
-  } else {
-    if (showing_insert_mode != FALSE) {
-      UI_CALL(normal_mode);
-    }
-    showing_insert_mode = FALSE;
-  }
-  conceal_check_cursur_line();
+  UI_CALL(mouse_off);
 }
 
 void ui_attach(UI *ui)
@@ -319,204 +214,212 @@ void ui_detach(UI *ui)
   }
 }
 
-static void highlight_start(int mask)
+void ui_clear(void)
 {
-  if (mask > HL_ALL) {
-    // attribute code
-    current_highlight_mask = mask;
-  } else {
-    // attribute mask
-    current_highlight_mask |= mask;
+  UI_CALL(clear);
+}
+
+// Set scrolling region for window 'wp'.
+// The region starts 'off' lines from the start of the window.
+// Also set the vertical scroll region for a vertically split window.  Always
+// the full width of the window, excluding the vertical separator.
+void ui_set_scroll_region(win_T *wp, int off)
+{
+  sr.top = wp->w_winrow + off;
+  sr.bot = wp->w_winrow + wp->w_height - 1;
+
+  if (wp->w_width != Columns) {
+    sr.left = wp->w_wincol;
+    sr.right = wp->w_wincol + wp->w_width - 1;
   }
+
+  UI_CALL(set_scroll_region, sr.top, sr.bot, sr.left, sr.right);
+}
+
+// Reset scrolling region to the whole screen.
+void ui_reset_scroll_region(void)
+{
+  sr.top = 0;
+  sr.bot = (int)Rows - 1;
+  sr.left = 0;
+  sr.right = (int)Columns - 1;
+  UI_CALL(set_scroll_region, sr.top, sr.bot, sr.left, sr.right);
+}
+
+void ui_append_lines(int count)
+{
+  UI_CALL(scroll, -count);
+}
+
+void ui_delete_lines(int count)
+{
+  UI_CALL(scroll, count);
+}
+
+void ui_eol_clear(void)
+{
+  UI_CALL(eol_clear);
+}
+
+void ui_start_highlight(int attr_code)
+{
+  current_attr_code = attr_code;
 
   if (!ui_count) {
     return;
   }
 
-  set_highlight_args(current_highlight_mask);
+  set_highlight_args(current_attr_code);
 }
 
-static void highlight_stop(int mask)
+void ui_stop_highlight(void)
 {
-  if (mask > HL_ALL) {
-    // attribute code
-    current_highlight_mask = HL_NORMAL;
-  } else {
-    // attribute mask
-    current_highlight_mask &= ~mask;
-  }
+  current_attr_code = HL_NORMAL;
 
-  set_highlight_args(current_highlight_mask);
-}
-
-static void set_highlight_args(int mask)
-{
-  HlAttrs rgb_attrs = { false, false, false, false, false, -1, -1 };
-  attrentry_T *aep = NULL;
-
-  if (mask > HL_ALL) {
-    aep = syn_cterm_attr2entry(mask);
-    mask = aep ? aep->ae_attr : 0;
-  }
-
-  rgb_attrs.bold = mask & HL_BOLD;
-  rgb_attrs.underline = mask & HL_UNDERLINE;
-  rgb_attrs.undercurl = mask & HL_UNDERCURL;
-  rgb_attrs.italic = mask & HL_ITALIC;
-  rgb_attrs.reverse = mask & (HL_INVERSE | HL_STANDOUT);
-  HlAttrs cterm_attrs = rgb_attrs;
-
-  if (aep) {
-    if (aep->fg_color != normal_fg) {
-      rgb_attrs.foreground = aep->fg_color;
-    }
-
-    if (aep->bg_color != normal_bg) {
-      rgb_attrs.background = aep->bg_color;
-    }
-
-    if (cterm_normal_fg_color != aep->ae_u.cterm.fg_color) {
-      cterm_attrs.foreground = aep->ae_u.cterm.fg_color - 1;
-    }
-
-    if (cterm_normal_bg_color != aep->ae_u.cterm.bg_color) {
-      cterm_attrs.background = aep->ae_u.cterm.bg_color - 1;
-    }
-  }
-
-  UI_CALL(highlight_set, (ui->rgb ? rgb_attrs : cterm_attrs));
-}
-
-static void parse_abstract_ui_codes(uint8_t *ptr, int len)
-{
   if (!ui_count) {
     return;
   }
 
-  int arg1 = 0, arg2 = 0;
-  uint8_t *end = ptr + len, *p, c;
-  bool update_cursor = false;
+  set_highlight_args(current_attr_code);
+}
 
-  while (ptr < end) {
-    if (ptr < end - 1 && ptr[0] == ESC && ptr[1] == '|') {
-      p = ptr + 2;
-      assert(p != end);
+void ui_visual_bell(void)
+{
+  UI_CALL(visual_bell);
+}
 
-      if (VIM_ISDIGIT(*p)) {
-        arg1 = getdigits_int(&p);
-        if (p >= end) {
-          break;
-        }
+void ui_puts(uint8_t *str)
+{
+  uint8_t *ptr = str;
+  uint8_t c;
 
-        if (*p == ';') {
-          p++;
-          arg2 = getdigits_int(&p);
-          if (p >= end)
-            break;
-        }
-      }
-
-      switch (*p) {
-        case 'C':
-          UI_CALL(clear);
-          break;
-        case 'M':
-          ui_cursor_goto(arg1, arg2);
-          break;
-        case 's':
-          update_cursor = true;
-          break;
-        case 'R':
-          if (arg1 < arg2) {
-            sr.top = arg1;
-            sr.bot = arg2;
-            UI_CALL(set_scroll_region, sr.top, sr.bot, sr.left, sr.right);
-          } else {
-            sr.top = arg2;
-            sr.bot = arg1;
-            UI_CALL(set_scroll_region, sr.top, sr.bot, sr.left, sr.right);
-          }
-          break;
-        case 'V':
-          if (arg1 < arg2) {
-            sr.left = arg1;
-            sr.right = arg2;
-            UI_CALL(set_scroll_region, sr.top, sr.bot, sr.left, sr.right);
-          } else {
-            sr.left = arg2;
-            sr.right = arg1;
-            UI_CALL(set_scroll_region, sr.top, sr.bot, sr.left, sr.right);
-          }
-          break;
-        case 'd':
-          UI_CALL(scroll, 1);
-          break;
-        case 'D':
-          UI_CALL(scroll, arg1);
-          break;
-        case 'i':
-          UI_CALL(scroll, -1);
-          break;
-        case 'I':
-          UI_CALL(scroll, -arg1);
-          break;
-        case '$':
-          UI_CALL(eol_clear);
-          break;
-        case 'h':
-          highlight_start(arg1);
-          break;
-        case 'H':
-          highlight_stop(arg1);
-          break;
-        case 'f':
-          UI_CALL(visual_bell);
-          break;
-        default:
-          // Skip the ESC
-          p = ptr + 1;
-          break;
-      }
-      ptr = ++p;
-    } else if ((c = *ptr) < 0x20) {
-      // Ctrl character
-      if (c == '\n') {
-        ui_linefeed();
-      } else if (c == '\r') {
-        ui_carriage_return();
-      } else if (c == '\b') {
-        ui_cursor_left();
-      } else if (c == Ctrl_L) {  // cursor right
-        ui_cursor_right();
-      } else if (c == Ctrl_G) {
-        UI_CALL(bell);
-      }
+  while ((c = *ptr)) {
+    if (c < 0x20) {
+      parse_control_character(c);
       ptr++;
     } else {
-      p = ptr;
-      while (p < end && (*p >= 0x20)) {
-        size_t clen = (size_t)mb_ptr2len(p);
-        UI_CALL(put, p, (size_t)clen);
-        col++;
-        if (mb_ptr2cells(p) > 1) {
-          // double cell character, blank the next cell
-          UI_CALL(put, NULL, 0);
-          col++;
-        }
-        if (col >= width) {
-          ui_linefeed();
-        }
-        p += clen;
-      }
-      ptr = p;
+      send_output(&ptr);
     }
   }
+}
 
-  if (update_cursor) {
-    ui_cursor_shape();
+void ui_putc(uint8_t c)
+{
+  uint8_t buf[2] = {c, 0};
+  ui_puts(buf);
+}
+
+void ui_cursor_goto(int new_row, int new_col)
+{
+  if (new_row == row && new_col == col) {
+    return;
+  }
+  row = new_row;
+  col = new_col;
+  pending_cursor_update = true;
+}
+
+int ui_current_row(void)
+{
+  return row;
+}
+
+int ui_current_col(void)
+{
+  return col;
+}
+
+void ui_flush(void)
+{
+  UI_CALL(flush);
+}
+
+static void send_output(uint8_t **ptr)
+{
+  uint8_t *p = *ptr;
+
+  while (*p >= 0x20) {
+    size_t clen = (size_t)mb_ptr2len(p);
+    UI_CALL(put, p, (size_t)clen);
+    col++;
+    if (mb_ptr2cells(p) > 1) {
+      // double cell character, blank the next cell
+      UI_CALL(put, NULL, 0);
+      col++;
+    }
+    if (col >= width) {
+      ui_linefeed();
+    }
+    p += clen;
   }
 
-  UI_CALL(flush);
+  *ptr = p;
+}
+
+static void parse_control_character(uint8_t c)
+{
+  if (c == '\n') {
+    ui_linefeed();
+  } else if (c == '\r') {
+    ui_carriage_return();
+  } else if (c == '\b') {
+    ui_cursor_left();
+  } else if (c == Ctrl_L) {
+    ui_cursor_right();
+  } else if (c == Ctrl_G) {
+    UI_CALL(bell);
+  }
+}
+
+static void set_highlight_args(int attr_code)
+{
+  HlAttrs rgb_attrs = { false, false, false, false, false, -1, -1 };
+  HlAttrs cterm_attrs = rgb_attrs;
+
+  if (attr_code == HL_NORMAL) {
+    goto end;
+  }
+
+  int rgb_mask = 0;
+  int cterm_mask = 0;
+  attrentry_T *aep = syn_cterm_attr2entry(attr_code);
+
+  if (!aep) {
+    goto end;
+  }
+
+  rgb_mask = aep->rgb_ae_attr;
+  cterm_mask = aep->cterm_ae_attr;
+
+  rgb_attrs.bold = rgb_mask & HL_BOLD;
+  rgb_attrs.underline = rgb_mask & HL_UNDERLINE;
+  rgb_attrs.undercurl = rgb_mask & HL_UNDERCURL;
+  rgb_attrs.italic = rgb_mask & HL_ITALIC;
+  rgb_attrs.reverse = rgb_mask & (HL_INVERSE | HL_STANDOUT);
+  cterm_attrs.bold = cterm_mask & HL_BOLD;
+  cterm_attrs.underline = cterm_mask & HL_UNDERLINE;
+  cterm_attrs.undercurl = cterm_mask & HL_UNDERCURL;
+  cterm_attrs.italic = cterm_mask & HL_ITALIC;
+  cterm_attrs.reverse = cterm_mask & (HL_INVERSE | HL_STANDOUT);
+
+  if (aep->rgb_fg_color != normal_fg) {
+    rgb_attrs.foreground = aep->rgb_fg_color;
+  }
+
+  if (aep->rgb_bg_color != normal_bg) {
+    rgb_attrs.background = aep->rgb_bg_color;
+  }
+
+  if (cterm_normal_fg_color != aep->cterm_fg_color) {
+    cterm_attrs.foreground = aep->cterm_fg_color - 1;
+  }
+
+  if (cterm_normal_bg_color != aep->cterm_bg_color) {
+    cterm_attrs.background = aep->cterm_bg_color - 1;
+  }
+
+end:
+  UI_CALL(highlight_set, (ui->rgb ? rgb_attrs : cterm_attrs));
 }
 
 static void ui_linefeed(void)
@@ -551,12 +454,35 @@ static void ui_cursor_right(void)
   ui_cursor_goto(row, new_col);
 }
 
-static void ui_cursor_goto(int new_row, int new_col)
+static void flush_cursor_update(void)
 {
-  if (new_row == row && new_col == col) {
+  if (pending_cursor_update) {
+    pending_cursor_update = false;
+    UI_CALL(cursor_goto, row, col);
+  }
+}
+
+// Notify that the current mode has changed. Can be used to change cursor
+// shape, for example.
+static void ui_change_mode(void)
+{
+  static int showing_insert_mode = MAYBE;
+
+  if (!full_screen) {
     return;
   }
-  row = new_row;
-  col = new_col;
-  UI_CALL(cursor_goto, row, col);
+
+  if (State & INSERT) {
+    if (showing_insert_mode != TRUE) {
+      UI_CALL(insert_mode);
+    }
+    showing_insert_mode = TRUE;
+  } else {
+    if (showing_insert_mode != FALSE) {
+      UI_CALL(normal_mode);
+    }
+    showing_insert_mode = FALSE;
+  }
+  conceal_check_cursur_line();
 }
+

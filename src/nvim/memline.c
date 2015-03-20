@@ -69,7 +69,8 @@
 #include "nvim/sha256.h"
 #include "nvim/spell.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
+#include "nvim/version.h"
 #include "nvim/tempfile.h"
 #include "nvim/undo.h"
 #include "nvim/window.h"
@@ -688,7 +689,7 @@ static void set_b0_fname(ZERO_BL *b0p, buf_T *buf)
     }
     FileInfo file_info;
     if (os_fileinfo((char *)buf->b_ffname, &file_info)) {
-      long_to_char((long)file_info.stat.st_mtim.tv_sec, b0p->b0_mtime);
+      long_to_char(file_info.stat.st_mtim.tv_sec, b0p->b0_mtime);
       long_to_char((long)os_fileinfo_inode(&file_info), b0p->b0_ino);
       buf_store_file_info(buf, &file_info);
       buf->b_mtime_read = buf->b_mtime;
@@ -969,7 +970,7 @@ void ml_recover(void)
           || org_file_info.stat.st_mtim.tv_sec != mtime)) {
     EMSG(_("E308: Warning: Original file may have been changed"));
   }
-  out_flush();
+  ui_flush();
 
   /* Get the 'fileformat' and 'fileencoding' from block zero. */
   b0_ff = (b0p->b0_flags & B0_FF_MASK);
@@ -1276,7 +1277,6 @@ recover_names (
   int num_files;
   int file_count = 0;
   char_u      **files;
-  int i;
   char_u      *dirp;
   char_u      *dir_name;
   char_u      *fname_res = NULL;
@@ -1356,12 +1356,13 @@ recover_names (
       }
     }
 
-    /* check for out-of-memory */
-    for (i = 0; i < num_names; ++i) {
+    // check for out-of-memory
+    for (int i = 0; i < num_names; ++i) {
       if (names[i] == NULL) {
-        for (i = 0; i < num_names; ++i)
-          free(names[i]);
+        for (int j = 0; j < num_names; ++j)
+          free(names[j]);
         num_names = 0;
+        break;
       }
     }
     if (num_names == 0)
@@ -1393,7 +1394,7 @@ recover_names (
      */
     if (curbuf->b_ml.ml_mfp != NULL
         && (p = curbuf->b_ml.ml_mfp->mf_fname) != NULL) {
-      for (i = 0; i < num_files; ++i)
+      for (int i = 0; i < num_files; ++i)
         if (path_full_compare(p, files[i], TRUE) & kEqualFiles) {
           /* Remove the name from files[i].  Move further entries
            * down.  When the array becomes empty free it here, since
@@ -1426,7 +1427,7 @@ recover_names (
       }
 
       if (num_files) {
-        for (i = 0; i < num_files; ++i) {
+        for (int i = 0; i < num_files; ++i) {
           /* print the swap file name */
           msg_outnum((long)++file_count);
           MSG_PUTS(".    ");
@@ -1436,11 +1437,11 @@ recover_names (
         }
       } else
         MSG_PUTS(_("      -- none --\n"));
-      out_flush();
+      ui_flush();
     } else
       file_count += num_files;
 
-    for (i = 0; i < num_names; ++i)
+    for (int i = 0; i < num_names; ++i)
       free(names[i]);
     if (num_files > 0)
       FreeWild(num_files, files);

@@ -21,7 +21,6 @@
 #ifdef HAVE_LOCALE_H
 # include <locale.h>
 #endif
-#include "nvim/version_defs.h"
 #include "nvim/hardcopy.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -41,7 +40,8 @@
 #include "nvim/screen.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
+#include "nvim/version.h"
 #include "nvim/tempfile.h"
 #include "nvim/os/os.h"
 #include "nvim/os/input.h"
@@ -96,7 +96,7 @@
  * Sets the current position at the start of line "page_line".
  * If margin is TRUE start in the left margin (for header and line number).
  *
- * int mch_print_text_out(char_u *p, int len);
+ * int mch_print_text_out(char_u *p, size_t len);
  * Output one character of text p[len] at the current position.
  * Return TRUE if there is no room for another character in the same line.
  *
@@ -495,7 +495,6 @@ static void prt_header(prt_settings_T *psettings, int pagenum, linenr_T lnum)
   int page_line;
   char_u      *tbuf;
   char_u      *p;
-  int l;
 
   /* Also use the space for the line number. */
   if (prt_use_number())
@@ -542,9 +541,9 @@ static void prt_header(prt_settings_T *psettings, int pagenum, linenr_T lnum)
   page_line = 0 - prt_header_height();
   mch_print_start_line(TRUE, page_line);
   for (p = tbuf; *p != NUL; ) {
-    if (mch_print_text_out(p,
-            (l = (*mb_ptr2len)(p))
-            )) {
+    int l = (*mb_ptr2len)(p);
+    assert(l >= 0);
+    if (mch_print_text_out(p, (size_t)l)) {
       ++page_line;
       if (page_line >= 0)       /* out of room in header */
         break;
@@ -573,7 +572,7 @@ static void prt_message(char_u *s)
 {
   screen_fill((int)Rows - 1, (int)Rows, 0, (int)Columns, ' ', ' ', 0);
   screen_puts(s, (int)Rows - 1, 0, hl_attr(HLF_R));
-  out_flush();
+  ui_flush();
 }
 
 void ex_hardcopy(exarg_T *eap)
@@ -617,10 +616,7 @@ void ex_hardcopy(exarg_T *eap)
           eap->forceit) == FAIL)
     return;
 
-  if (t_colors > 1)
-    settings.modec = 'c';
-  else
-    settings.modec = 't';
+  settings.modec = 'c';
 
   if (!syntax_present(curwin))
     settings.do_syntax = FALSE;
@@ -887,7 +883,7 @@ static colnr_T hardcopy_line(prt_settings_T *psettings, int page_line, prt_pos_T
       ppos->ff = TRUE;
       need_break = 1;
     } else {
-      need_break = mch_print_text_out(line + col, outputlen);
+      need_break = mch_print_text_out(line + col, (size_t)outputlen);
       if (has_mbyte)
         print_pos += (*mb_ptr2cells)(line + col);
       else
@@ -1992,7 +1988,7 @@ static void prt_page_margins(double width, double height, double *left, double *
 static void prt_font_metrics(int font_scale)
 {
   prt_line_height = (double)font_scale;
-  prt_char_width = (double)PRT_PS_FONT_TO_USER(font_scale, prt_ps_font->wx);
+  prt_char_width = PRT_PS_FONT_TO_USER(font_scale, prt_ps_font->wx);
 }
 
 
@@ -2031,10 +2027,10 @@ static int prt_get_lpp(void)
    * font height (based on its bounding box) and the line height, handling the
    * case where the font height can exceed the line height.
    */
-  prt_bgcol_offset = (double)PRT_PS_FONT_TO_USER(prt_line_height,
+  prt_bgcol_offset = PRT_PS_FONT_TO_USER(prt_line_height,
       prt_ps_font->bbox_min_y);
   if ((prt_ps_font->bbox_max_y - prt_ps_font->bbox_min_y) < 1000.0) {
-    prt_bgcol_offset -= (double)PRT_PS_FONT_TO_USER(prt_line_height,
+    prt_bgcol_offset -= PRT_PS_FONT_TO_USER(prt_line_height,
         (1000.0 - (prt_ps_font->bbox_max_y -
                    prt_ps_font->bbox_min_y)) / 2);
   }
@@ -2444,7 +2440,7 @@ int mch_print_begin(prt_settings_T *psettings)
     STRCPY(buffer, "Unknown");
   }
   prt_dsc_textline("For", buffer);
-  prt_dsc_textline("Creator", NVIM_VERSION_LONG);
+  prt_dsc_textline("Creator", longVersion);
   /* Note: to ensure Clean8bit I don't think we can use LC_TIME */
   now = time(NULL);
   p_time = ctime(&now);
@@ -2874,7 +2870,7 @@ void mch_print_start_line(int margin, int page_line)
   prt_half_width = FALSE;
 }
 
-int mch_print_text_out(char_u *p, int len)
+int mch_print_text_out(char_u *p, size_t len)
 {
   int need_break;
   char_u ch;

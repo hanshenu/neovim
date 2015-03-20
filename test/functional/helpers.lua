@@ -1,4 +1,5 @@
 require('coxpcall')
+local assert = require('luassert')
 local Loop = require('nvim.loop')
 local MsgpackStream = require('nvim.msgpack_stream')
 local AsyncSession = require('nvim.async_session')
@@ -8,6 +9,15 @@ local nvim_prog = os.getenv('NVIM_PROG') or 'build/bin/nvim'
 local nvim_argv = {nvim_prog, '-u', 'NONE', '-i', 'NONE', '-N',
                    '--cmd', 'set shortmess+=I background=light noswapfile',
                    '--embed'}
+
+-- Formulate a path to the directory containing nvim.  We use this to
+-- help run test executables.  It helps to keep the tests working, even
+-- when the build is not in the default location.
+local nvim_dir = nvim_prog:gsub("[/\\][^/\\]+$", "")
+if nvim_dir == nvim_prog then
+    nvim_dir = "."
+end
+
 local prepend_argv
 
 if os.getenv('VALGRIND') then
@@ -229,11 +239,15 @@ local function curbuf(method, ...)
   return buffer(method, buf, ...)
 end
 
+local function wait()
+  session:request('vim_eval', '1')
+end
+
 local function curbuf_contents()
   -- Before inspecting the buffer, execute 'vim_eval' to wait until all
   -- previously sent keys are processed(vim_eval is a deferred function, and
   -- only processed after all input)
-  session:request('vim_eval', '1')
+  wait()
   return table.concat(curbuf('get_line_slice', 0, -1, true, true), '\n')
 end
 
@@ -278,11 +292,13 @@ return {
   expect = expect,
   ok = ok,
   nvim = nvim,
+  nvim_dir = nvim_dir,
   buffer = buffer,
   window = window,
   tabpage = tabpage,
   curbuf = curbuf,
   curwin = curwin,
   curtab = curtab,
-  curbuf_contents = curbuf_contents
+  curbuf_contents = curbuf_contents,
+  wait = wait
 }

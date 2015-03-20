@@ -62,7 +62,6 @@
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
 #include "nvim/tag.h"
-#include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/undo.h"
 #include "nvim/version.h"
@@ -146,10 +145,6 @@ struct dbg_stuff {
 # define gui_mch_find_dialog    ex_ni
 # define gui_mch_replace_dialog ex_ni
 # define ex_helpfind            ex_ni
-#if defined(FEAT_GUI) || defined(UNIX) || defined(MSWIN)
-#else
-# define ex_winpos          ex_ni
-#endif
 static int did_lcd;             /* whether ":lcd" was produced for a session */
 #ifndef HAVE_WORKING_LIBINTL
 # define ex_language            ex_ni
@@ -1098,9 +1093,7 @@ static char_u * do_one_cmd(char_u **cmdlinep,
   int save_msg_scroll = msg_scroll;
   int save_msg_silent = -1;
   int did_esilent = 0;
-#ifdef HAVE_SANDBOX
   int did_sandbox = FALSE;
-#endif
   cmdmod_T save_cmdmod;
   int ni;                                       /* set when Not Implemented */
 
@@ -1245,11 +1238,9 @@ static char_u * do_one_cmd(char_u **cmdlinep,
       continue;
 
     case 's':   if (checkforcmd(&ea.cmd, "sandbox", 3)) {
-#ifdef HAVE_SANDBOX
         if (!did_sandbox)
           ++sandbox;
         did_sandbox = TRUE;
-#endif
         continue;
     }
       if (!checkforcmd(&ea.cmd, "silent", 3))
@@ -1514,13 +1505,11 @@ static char_u * do_one_cmd(char_u **cmdlinep,
   }
 
   if (!ea.skip) {
-#ifdef HAVE_SANDBOX
     if (sandbox != 0 && !(ea.argt & SBOXOK)) {
       /* Command not allowed in sandbox. */
       errormsg = (char_u *)_(e_sandbox);
       goto doend;
     }
-#endif
     if (!curbuf->b_p_ma && (ea.argt & MODIFY)) {
       /* Command not allowed in non-'modifiable' buffer */
       errormsg = (char_u *)_(e_modifiable);
@@ -1988,10 +1977,8 @@ doend:
       msg_col = 0;
   }
 
-#ifdef HAVE_SANDBOX
   if (did_sandbox)
     --sandbox;
-#endif
 
   if (ea.nextcmd && *ea.nextcmd == NUL)         /* not really a next command */
     ea.nextcmd = NULL;
@@ -2587,12 +2574,10 @@ set_one_cmd_context (
       }
       /* An argument can contain just about everything, except
        * characters that end the command and white space. */
-      else if (c == '|' || c == '\n' || c == '"' || (vim_iswhite(c)
-#ifdef SPACE_IN_FILENAME
-                                                     && (!(ea.argt & NOSPC) ||
-                                                         usefilter)
-#endif
-                                                     )) {
+      else if (c == '|'
+            || c == '\n'
+            || c == '"'
+            || vim_iswhite(c)) {
         len = 0;          /* avoid getting stuck when space is in 'isfname' */
         while (*p != NUL) {
           if (has_mbyte)
@@ -3170,7 +3155,7 @@ get_address (
     case '?':                           /* '/' or '?' - search */
       c = *cmd++;
       if (skip) {                       /* skip "/pat/" */
-        cmd = skip_regexp(cmd, c, (int)p_magic, NULL);
+        cmd = skip_regexp(cmd, c, p_magic, NULL);
         if (*cmd == c)
           ++cmd;
       } else {
@@ -4337,7 +4322,7 @@ static void uc_list(char_u *name, size_t name_len)
       msg_outtrans_special(cmd->uc_rep, FALSE);
       if (p_verbose > 0)
         last_set_msg(cmd->uc_scriptID);
-      out_flush();
+      ui_flush();
       os_breakcheck();
       if (got_int)
         break;
@@ -5332,10 +5317,12 @@ void tabpage_close_other(tabpage_T *tp, int forceit)
   int done = 0;
   win_T       *wp;
   int h = tabline_height();
+  char_u prev_idx[NUMBUFLEN];
 
   /* Limit to 1000 windows, autocommands may add a window while we close
    * one.  OK, so I'm paranoid... */
   while (++done < 1000) {
+    sprintf((char *)prev_idx, "%i", tabpage_index(tp));
     wp = tp->tp_firstwin;
     ex_win_close(forceit, wp, tp);
 
@@ -5344,6 +5331,7 @@ void tabpage_close_other(tabpage_T *tp, int forceit)
     if (!valid_tabpage(tp) || tp->tp_firstwin == wp)
       break;
   }
+  apply_autocmds(EVENT_TABCLOSED, prev_idx, prev_idx, FALSE, curbuf);
 
   redraw_tabline = TRUE;
   if (h != tabline_height())
@@ -5387,26 +5375,19 @@ static void ex_hide(exarg_T *eap)
  */
 static void ex_stop(exarg_T *eap)
 {
-  /*
-   * Disallow suspending for "rvim".
-   */
-  if (!check_restricted()
-      ) {
-    if (!eap->forceit)
+  // Disallow suspending in restricted mode (-Z)
+  if (!check_restricted()) {
+    if (!eap->forceit) {
       autowrite_all();
-    windgoto((int)Rows - 1, 0);
-    out_char('\n');
-    out_flush();
-    stoptermcap();
-    out_flush();                /* needed for SUN to restore xterm buffer */
-    mch_restore_title(3);       /* restore window titles */
+    }
+    ui_cursor_goto((int)Rows - 1, 0);
+    ui_putc('\n');
+    ui_flush();
     ui_suspend();               /* call machine specific function */
     maketitle();
     resettitle();               /* force updating the title */
-    starttermcap();
-    scroll_start();             /* scroll screen before redrawing */
     redraw_later_clear();
-    shell_resized();            /* may have resized window */
+    ui_refresh();            /* may have resized window */
   }
 }
 
@@ -5464,7 +5445,7 @@ static void ex_print(exarg_T *eap)
           eap->cmdidx == CMD_list || (eap->flags & EXFLAG_LIST));
       if (++eap->line1 > eap->line2)
         break;
-      out_flush();                  /* show one line at a time */
+      ui_flush();                  /* show one line at a time */
     }
     setpcmark();
     /* put cursor at last line */
@@ -5721,7 +5702,9 @@ void ex_splitview(exarg_T *eap)
     if (win_new_tabpage(cmdmod.tab != 0 ? cmdmod.tab
             : eap->addr_count == 0 ? 0
             : (int)eap->line2 + 1) != FAIL) {
+      apply_autocmds(EVENT_TABNEW, eap->arg, eap->arg,  FALSE, curbuf); 
       do_exedit(eap, old_curwin);
+      apply_autocmds(EVENT_TABNEWENTERED, NULL, NULL, FALSE, curbuf);
 
       /* set the alternate buffer for the window we came from */
       if (curwin != old_curwin
@@ -5838,7 +5821,7 @@ static void ex_tabs(exarg_T *eap)
     msg_putchar('\n');
     vim_snprintf((char *)IObuff, IOSIZE, _("Tab page %d"), tabcount++);
     msg_outtrans_attr(IObuff, hl_attr(HLF_T));
-    out_flush();            /* output one line at a time */
+    ui_flush();            /* output one line at a time */
     os_breakcheck();
 
     FOR_ALL_WINDOWS_IN_TAB(wp, tp) {
@@ -5857,7 +5840,7 @@ static void ex_tabs(exarg_T *eap)
         home_replace(wp->w_buffer, wp->w_buffer->b_fname,
             IObuff, IOSIZE, TRUE);
       msg_outtrans(IObuff);
-      out_flush();                  /* output one line at a time */
+      ui_flush();                  /* output one line at a time */
       os_breakcheck();
     }
   }
@@ -5871,7 +5854,7 @@ static void ex_tabs(exarg_T *eap)
 static void ex_mode(exarg_T *eap)
 {
   if (*eap->arg == NUL) {
-    shell_resized();
+    ui_refresh();
   } else {
     EMSG(_(e_screenmode));
   }
@@ -5898,13 +5881,13 @@ static void ex_resize(exarg_T *eap)
       n += curwin->w_width;
     else if (n == 0 && eap->arg[0] == NUL)      /* default is very wide */
       n = 9999;
-    win_setwidth_win((int)n, wp);
+    win_setwidth_win(n, wp);
   } else {
     if (*eap->arg == '-' || *eap->arg == '+')
       n += curwin->w_height;
     else if (n == 0 && eap->arg[0] == NUL)      /* default is very wide */
       n = 9999;
-    win_setheight_win((int)n, wp);
+    win_setheight_win(n, wp);
   }
 }
 
@@ -6380,7 +6363,7 @@ static void ex_sleep(exarg_T *eap)
   if (cursor_valid()) {
     n = curwin->w_winrow + curwin->w_wrow - msg_scrolled;
     if (n >= 0)
-      windgoto((int)n, curwin->w_wincol + curwin->w_wcol);
+      ui_cursor_goto(n, curwin->w_wincol + curwin->w_wcol);
   }
 
   len = eap->line2;
@@ -6398,9 +6381,7 @@ static void ex_sleep(exarg_T *eap)
 void do_sleep(long msec)
 {
   long done;
-
-  cursor_on();
-  out_flush();
+  ui_flush();  // flush before waiting
   for (done = 0; !got_int && done < msec; done += 1000L) {
     os_delay(msec - done > 1000L ? 1000L : msec - done, true);
     os_breakcheck();
@@ -6438,7 +6419,7 @@ static void ex_winsize(exarg_T *eap)
   p = arg;
   h = getdigits_int(&arg);
   if (*p != NUL && *arg == NUL)
-    screen_resize(w, h, TRUE);
+    screen_resize(w, h);
   else
     EMSG(_("E465: :winsize requires two number arguments"));
 }
@@ -6472,35 +6453,6 @@ static void ex_wincmd(exarg_T *eap)
     postponed_split_tab = 0;
   }
 }
-
-#if defined(FEAT_GUI) || defined(UNIX) || defined(MSWIN)
-/*
- * ":winpos".
- */
-static void ex_winpos(exarg_T *eap)
-{
-  int x, y;
-  char_u      *arg = eap->arg;
-  char_u      *p;
-
-  if (*arg == NUL) {
-    EMSG(_("E188: Obtaining window position not implemented for this platform"));
-  } else {
-    x = getdigits_int(&arg);
-    arg = skipwhite(arg);
-    p = arg;
-    y = getdigits_int(&arg);
-    if (*p == NUL || *arg != NUL) {
-      EMSG(_("E466: :winpos requires two number arguments"));
-      return;
-    }
-# ifdef HAVE_TGETENT
-    if (*T_CWP)
-      term_set_winpos(x, y);
-# endif
-  }
-}
-#endif
 
 /*
  * Handle command that work like operators: ":delete", ":yank", ":>" and ":<".
@@ -6651,9 +6603,6 @@ static void ex_at(exarg_T *eap)
 
   curwin->w_cursor.lnum = eap->line2;
 
-#ifdef USE_ON_FLY_SCROLL
-  dont_scroll = TRUE;           /* disallow scrolling here */
-#endif
 
   /* get the register name.  No name means to use the previous one */
   c = *eap->arg;
@@ -6861,7 +6810,7 @@ static void ex_redraw(exarg_T *eap)
   /* No need to wait after an intentional redraw. */
   need_wait_return = FALSE;
 
-  out_flush();
+  ui_flush();
 }
 
 /*
@@ -6883,7 +6832,7 @@ static void ex_redrawstatus(exarg_T *eap)
       0);
   RedrawingDisabled = r;
   p_lz = p;
-  out_flush();
+  ui_flush();
 }
 
 static void close_redir(void)

@@ -41,7 +41,6 @@
 #include "nvim/spell.h"
 #include "nvim/syntax.h"
 #include "nvim/tag.h"
-#include "nvim/term.h"
 #include "nvim/window.h"
 #include "nvim/os/os.h"
 #include "nvim/os/shell.h"
@@ -298,17 +297,6 @@ void del_trailing_spaces(char_u *ptr)
   q = ptr + STRLEN(ptr);
   while (--q > ptr && vim_iswhite(q[0]) && q[-1] != '\\' && q[-1] != Ctrl_V)
     *q = NUL;
-}
-
-/*
- * Like strncpy(), but always terminate the result with one NUL.
- * "to" must be "len + 1" long!
- */
-void vim_strncpy(char_u *restrict to, const char_u *restrict from, size_t len)
-  FUNC_ATTR_NONNULL_ALL
-{
-  STRNCPY(to, from, len);
-  to[len] = NUL;
 }
 
 /*

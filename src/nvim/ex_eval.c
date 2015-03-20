@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <limits.h>
 
 #include "nvim/vim.h"
 #include "nvim/ascii.h"
@@ -1028,7 +1029,8 @@ void ex_continue(exarg_T *eap)
      * next).  Therefor, inactivate all conditionals except the ":while"
      * itself (if reached). */
     idx = cleanup_conditionals(cstack, CSF_WHILE | CSF_FOR, FALSE);
-    if (idx >= 0 && (cstack->cs_flags[idx] & (CSF_WHILE | CSF_FOR))) {
+    assert(idx >= 0);
+    if (cstack->cs_flags[idx] & (CSF_WHILE | CSF_FOR)) {
       rewind_conditionals(cstack, idx, CSF_TRY, &cstack->cs_trylevel);
 
       /*
@@ -1813,7 +1815,7 @@ void leave_cleanup(cleanup_T *csp)
   if (aborting() || need_rethrow) {
     if (pending & CSTP_THROW)
       /* Cancel the pending exception (includes report). */
-      discard_exception((except_T *)csp->exception, FALSE);
+      discard_exception(csp->exception, FALSE);
     else
       report_discard_pending(pending, NULL);
 

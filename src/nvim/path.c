@@ -297,7 +297,7 @@ int vim_fnamecmp(char_u *x, char_u *y)
   return vim_fnamencmp(x, y, MAXPATHL);
 #else
   if (p_fic)
-    return MB_STRICMP(x, y);
+    return mb_stricmp(x, y);
   return STRCMP(x, y);
 #endif
 }
@@ -327,7 +327,7 @@ int vim_fnamencmp(char_u *x, char_u *y, size_t len)
   return cx - cy;
 #else
   if (p_fic)
-    return MB_STRNICMP(x, y, len);
+    return mb_strnicmp(x, y, len);
   return STRNCMP(x, y, len);
 #endif
 }
@@ -401,9 +401,7 @@ char_u *save_absolute_path(const char_u *name)
 }
 
 
-#if !defined(NO_EXPANDPATH)
-
-#if defined(UNIX) || defined(USE_UNIXFILENAME)
+#if defined(UNIX)
 /*
  * Unix style wildcard expansion code.
  * It's here because it's used both for Unix and Mac.
@@ -578,16 +576,6 @@ unix_expandpath (
           if (*path_end != NUL)
             backslash_halve(buf + len + 1);
           if (os_file_exists(buf)) {          /* add existing file */
-#ifdef MACOS_CONVERT
-            size_t precomp_len = STRLEN(buf)+1;
-            char_u *precomp_buf =
-              mac_precompose_path(buf, precomp_len, &precomp_len);
-
-            if (precomp_buf) {
-              memmove(buf, precomp_buf, precomp_len);
-              free(precomp_buf);
-            }
-#endif
             addfile(gap, buf, flags);
           }
         }
@@ -1244,7 +1232,6 @@ addfile (
     add_pathsep(p);
   GA_APPEND(char_u *, gap, p);
 }
-#endif /* !NO_EXPANDPATH */
 
 /*
  * Converts a file name into a canonical form. It simplifies a file name into
@@ -1618,7 +1605,6 @@ int same_directory(char_u *f1, char_u *f2)
          && pathcmp((char *)ffname, (char *)f2, (int)(t1 - ffname)) == 0;
 }
 
-#if !defined(NO_EXPANDPATH)
 /*
  * Compare path "p[]" to "q[]".
  * If "maxlen" >= 0 compare "p[maxlen]" to "q[maxlen]"
@@ -1683,9 +1669,7 @@ int pathcmp(const char *p, const char *q, int maxlen)
     return -1;              /* no match */
   return 1;
 }
-#endif
 
-#ifndef NO_EXPANDPATH
 /*
  * Expand a path into all matching files and/or directories.  Handles "*",
  * "?", "[a-z]", "**", etc.
@@ -1698,7 +1682,6 @@ int mch_expandpath(garray_T *gap, char_u *path, int flags)
 {
   return unix_expandpath(gap, path, 0, flags, FALSE);
 }
-#endif
 
 /// Try to find a shortname by comparing the fullname with the current
 /// directory.

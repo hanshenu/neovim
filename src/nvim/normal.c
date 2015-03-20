@@ -57,7 +57,6 @@
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
 #include "nvim/tag.h"
-#include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/mouse.h"
 #include "nvim/undo.h"
@@ -427,7 +426,7 @@ normal_cmd (
   int c;
   bool ctrl_w = false;                  /* got CTRL-W command */
   int old_col = curwin->w_curswant;
-  bool need_flushbuf;                   /* need to call out_flush() */
+  bool need_flushbuf;                   /* need to call ui_flush() */
   pos_T old_pos;                        /* cursor position before command */
   int mapped_len;
   static int old_mapped_len = 0;
@@ -474,9 +473,6 @@ normal_cmd (
   mapped_len = typebuf_maplen();
 
   State = NORMAL_BUSY;
-#ifdef USE_ON_FLY_SCROLL
-  dont_scroll = false;          /* allow scrolling here */
-#endif
 
   /* Set v:count here, when called from main() and not a stuffed
    * command, so that v:count can be used in an expression mapping
@@ -869,7 +865,7 @@ getcount:
    * mappings.
    */
   if (need_flushbuf)
-    out_flush();
+    ui_flush();
   if (ca.cmdchar != K_IGNORE)
     did_cursorhold = false;
 
@@ -987,8 +983,7 @@ getcount:
       free(kmsg);
     }
     setcursor();
-    cursor_on();
-    out_flush();
+    ui_flush();
     if (msg_scroll || emsg_on_display)
       os_delay(1000L, true);            /* wait at least one second */
     os_delay(3000L, false);             /* wait up to three seconds */
@@ -1731,7 +1726,7 @@ static void op_colon(oparg_T *oap)
         stuffcharReadbuff('$');
       else if (oap->start.lnum == curwin->w_cursor.lnum) {
         stuffReadbuff((char_u *)".+");
-        stuffnumReadbuff((long)oap->line_count - 1);
+        stuffnumReadbuff(oap->line_count - 1);
       } else
         stuffnumReadbuff((long)oap->end.lnum);
     }
@@ -1834,7 +1829,6 @@ do_mouse (
     bool fixindent                  /* PUT_FIXINDENT if fixing indent necessary */
 )
 {
-  static bool do_always = false;        /* ignore 'mouse' setting next time */
   static bool got_click = false;        /* got a click some time back */
 
   int which_button;             /* MOUSE_LEFT, _MIDDLE or _RIGHT */
@@ -1858,23 +1852,6 @@ do_mouse (
   int regname;
 
   save_cursor = curwin->w_cursor;
-
-  // When "abstract_ui" is active, always recognize mouse events, otherwise:
-  // - Ignore mouse event in normal mode if 'mouse' doesn't include 'n'.
-  // - Ignore mouse event in visual mode if 'mouse' doesn't include 'v'.
-  // - For command line and insert mode 'mouse' is checked before calling
-  //   do_mouse().
-  if (!abstract_ui) {
-    if (do_always)
-      do_always = false;
-    else {
-      if (VIsual_active) {
-        if (!mouse_has(MOUSE_VISUAL))
-          return false;
-      } else if (State == NORMAL && !mouse_has(MOUSE_NORMAL))
-        return false;
-    }
-  }
 
   for (;; ) {
     which_button = get_mouse_button(KEY2TERMCAP1(c), &is_click, &is_drag);
@@ -1996,7 +1973,6 @@ do_mouse (
           stuffcharReadbuff('y');
           stuffcharReadbuff(K_MIDDLEMOUSE);
         }
-        do_always = true;               /* ignore 'mouse' setting next time */
         return false;
       }
       /*
@@ -3021,8 +2997,6 @@ static void display_showcmd(void)
 {
   int len;
 
-  cursor_off();
-
   len = (int)STRLEN(showcmd_buf);
   if (len == 0)
     showcmd_is_clear = true;
@@ -3215,7 +3189,7 @@ static void nv_help(cmdarg_T *cap)
 static void nv_addsub(cmdarg_T *cap)
 {
   if (!checkclearopq(cap->oap)
-      && do_addsub((int)cap->cmdchar, cap->count1))
+      && do_addsub(cap->cmdchar, cap->count1))
     prep_redo_cmd(cap);
 }
 
@@ -3627,9 +3601,6 @@ static void nv_zet(cmdarg_T *cap)
       return;
     n = nchar - '0';
     for (;; ) {
-#ifdef USE_ON_FLY_SCROLL
-      dont_scroll = true;               /* disallow scrolling here */
-#endif
       ++no_mapping;
       ++allow_keys;         /* no mapping for nchar, but allow key codes */
       nchar = plain_vgetc();
@@ -4064,7 +4035,7 @@ static void nv_colon(cmdarg_T *cap)
       stuffcharReadbuff('.');
       if (cap->count0 > 1) {
         stuffReadbuff((char_u *)",.+");
-        stuffnumReadbuff((long)cap->count0 - 1L);
+        stuffnumReadbuff(cap->count0 - 1L);
       }
     }
 
@@ -4784,7 +4755,7 @@ static void nv_dollar(cmdarg_T *cap)
   if (!virtual_active() || gchar_cursor() != NUL
       || cap->oap->op_type == OP_NOP)
     curwin->w_curswant = MAXCOL;        /* so we stay at the end */
-  if (cursor_down((long)(cap->count1 - 1),
+  if (cursor_down(cap->count1 - 1,
           cap->oap->op_type == OP_NOP) == false)
     clearopbeep(cap->oap);
   else if ((fdo_flags & FDO_HOR) && KeyTyped && cap->oap->op_type == OP_NOP)
@@ -6206,7 +6177,7 @@ static void nv_g_cmd(cmdarg_T *cap)
     cap->oap->motion_type = MCHAR;
     cap->oap->inclusive = true;
     curwin->w_curswant = MAXCOL;
-    if (cursor_down((long)(cap->count1 - 1),
+    if (cursor_down(cap->count1 - 1,
             cap->oap->op_type == OP_NOP) == false)
       clearopbeep(cap->oap);
     else {

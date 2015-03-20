@@ -18,7 +18,7 @@
 #include "nvim/vim.h"
 #include "nvim/memory.h"
 #include "nvim/misc2.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/screen.h"
 
 #include "nvim/lib/klist.h"
@@ -54,7 +54,6 @@ void event_init(void)
   wstream_init();
   // Initialize input events
   input_init();
-  input_start();
   // Timer to wake the event loop if a timeout argument is passed to
   // `event_poll`
   // Signals
@@ -75,13 +74,11 @@ void event_teardown(void)
 
   process_events_from(immediate_events);
   process_events_from(deferred_events);
-
+  input_stop_stdin();
   channel_teardown();
   job_teardown();
   server_teardown();
   signal_teardown();
-  input_stop();
-  input_teardown();
   // this last `uv_run` will return after all handles are stopped, it will
   // also take care of finishing any uv_close calls made by other *_teardown
   // functions.
@@ -165,7 +162,7 @@ void event_process(void)
 
   if (must_redraw) {
     update_screen(0);
-    out_flush();
+    ui_flush();
   }
 }
 

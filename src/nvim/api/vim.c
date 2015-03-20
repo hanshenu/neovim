@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #include "nvim/api/vim.h"
 #include "nvim/ascii.h"
@@ -22,7 +23,6 @@
 #include "nvim/eval.h"
 #include "nvim/misc2.h"
 #include "nvim/syntax.h"
-#include "nvim/term.h"
 #include "nvim/getchar.h"
 #include "nvim/os/input.h"
 
@@ -145,7 +145,7 @@ String vim_command_output(String str, Error *err)
 Object vim_eval(String str, Error *err)
   FUNC_ATTR_DEFERRED
 {
-  Object rv;
+  Object rv = OBJECT_INIT;
   // Evaluate the expression
   try_start();
   typval_T *expr_result = eval_expr((char_u *) str.data, NULL);
@@ -578,7 +578,7 @@ Array vim_get_api_info(uint64_t channel_id)
 ///        `emsg` instead of `msg` to print each line)
 static void write_msg(String message, bool to_err)
 {
-  static int out_pos = 0, err_pos = 0;
+  static size_t out_pos = 0, err_pos = 0;
   static char out_line_buf[LINE_BUFFER_SIZE], err_line_buf[LINE_BUFFER_SIZE];
 
 #define PUSH_CHAR(i, pos, line_buf, msg)                                      \

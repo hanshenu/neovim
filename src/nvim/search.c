@@ -9,6 +9,7 @@
  * search.c: code for normal mode searching commands
  */
 
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -46,7 +47,6 @@
 #include "nvim/regexp.h"
 #include "nvim/screen.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/window.h"
 #include "nvim/os/time.h"
@@ -986,7 +986,7 @@ int do_search(
        * If there is a matching '/' or '?', toss it.
        */
       ps = strcopy;
-      p = skip_regexp(pat, dirc, (int)p_magic, &strcopy);
+      p = skip_regexp(pat, dirc, p_magic, &strcopy);
       if (strcopy != ps) {
         /* made a copy of "pat" to change "\?" to "?" */
         searchcmdlen += (int)(STRLEN(pat) - STRLEN(strcopy));
@@ -1088,7 +1088,7 @@ int do_search(
         free(msgbuf);
 
         gotocmdline(FALSE);
-        out_flush();
+        ui_flush();
         msg_nowait = TRUE;                  /* don't wait for this message */
       }
     }
@@ -1258,11 +1258,12 @@ int search_for_exact_line(buf_T *buf, pos_T *pos, int dir, char_u *pat)
      * ignored because we are interested in the next line -- Acevedo */
     if ((compl_cont_status & CONT_ADDING)
         && !(compl_cont_status & CONT_SOL)) {
-      if ((p_ic ? MB_STRICMP(p, pat) : STRCMP(p, pat)) == 0)
+      if ((p_ic ? mb_stricmp(p, pat) : STRCMP(p, pat)) == 0)
         return OK;
     } else if (*p != NUL) {   /* ignore empty lines */
       /* expanding lines or words */
-      if ((p_ic ? MB_STRNICMP(p, pat, compl_length)
+      assert(compl_length >= 0);
+      if ((p_ic ? mb_strnicmp(p, pat, (size_t)compl_length)
            : STRNCMP(p, pat, compl_length)) == 0)
         return OK;
     }
@@ -2043,8 +2044,7 @@ showmatch (
       p_siso = 0;                       /* don't use 'sidescrolloff' here */
       showruler(FALSE);
       setcursor();
-      cursor_on();                      /* make sure that the cursor is shown */
-      out_flush();
+      ui_flush();
       /* Restore dollar_vcol(), because setcursor() may call curs_rows()
        * which resets it if the matching position is in a previous line
        * and has a higher column number. */
@@ -3810,7 +3810,7 @@ current_search (
       flags = SEARCH_END;
 
     int result = searchit(curwin, curbuf, &pos, (dir ? FORWARD : BACKWARD),
-        spats[last_idx].pat, (long) (i ? count : 1),
+        spats[last_idx].pat, i ? count : 1,
         SEARCH_KEEP | flags, RE_SEARCH, 0, NULL);
 
     /* First search may fail, but then start searching from the
@@ -4154,7 +4154,7 @@ find_pattern_in_path (
               MSG_PUTS(_("  NOT FOUND"));
           }
         }
-        out_flush();                /* output each line directly */
+        ui_flush();                /* output each line directly */
       }
 
       if (new_fname != NULL) {
@@ -4234,8 +4234,10 @@ search_line:
             ) {
           /* compare the first "len" chars from "ptr" */
           startp = skipwhite(p);
-          if (p_ic)
-            matched = !MB_STRNICMP(startp, ptr, len);
+          if (p_ic) {
+            assert(len >= 0);
+            matched = !mb_strnicmp(startp, ptr, (size_t)len);
+          }
           else
             matched = !STRNCMP(startp, ptr, len);
           if (matched && define_matched && whole
@@ -4250,7 +4252,7 @@ search_line:
            * looking for a define).  A line starting with "# define"
            * is not considered to be a comment line.
            */
-          if (!define_matched && skip_comments) {
+          if (skip_comments) {
             if ((*line != '#' ||
                  STRNCMP(skipwhite(line + 1), "define", 6) != 0)
                 && get_leader_len(line, NULL, FALSE, TRUE))
@@ -4551,7 +4553,7 @@ static void show_pat_in_path(char_u *line, int type, int did_show, int action, F
       MSG_PUTS(" ");
     }
     msg_prt_line(line, FALSE);
-    out_flush();                        /* show one line at a time */
+    ui_flush();                        /* show one line at a time */
 
     /* Definition continues until line that doesn't end with '\' */
     if (got_int || type != FIND_DEFINE || p < line || *p != '\\')

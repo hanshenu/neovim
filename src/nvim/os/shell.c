@@ -17,7 +17,7 @@
 #include "nvim/vim.h"
 #include "nvim/message.h"
 #include "nvim/memory.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/misc2.h"
 #include "nvim/screen.h"
 #include "nvim/memline.h"
@@ -99,7 +99,6 @@ int os_call_shell(char_u *cmd, ShellOpts opts, char_u *extra_args)
   char *output = NULL, **output_ptr = NULL;
   int current_state = State;
   bool forward_output = true;
-  out_flush();
 
   // While the child is running, ignore terminating signals
   signal_reject_deadly();
@@ -201,14 +200,14 @@ static int shell(const char *cmd,
   char **argv = shell_build_argv(cmd, extra_args);
 
   int status;
-  Job *job = job_start(argv,
-                       &buf,
-                       input != NULL,
-                       data_cb,
-                       data_cb,
-                       NULL,
-                       0,
-                       &status);
+  JobOptions opts = JOB_OPTIONS_INIT;
+  opts.argv = argv;
+  opts.data = &buf;
+  opts.writable = input != NULL;
+  opts.stdout_cb = data_cb;
+  opts.stderr_cb = data_cb;
+  opts.exit_cb = NULL;
+  Job *job = job_start(opts, &status);
 
   if (status <= 0) {
     // Failed, probably due to `sh` not being executable
@@ -239,7 +238,12 @@ static int shell(const char *cmd,
     job_close_in(job);
   }
 
+  // invoke busy_start here so event_poll_until wont change the busy state for
+  // the UI
+  ui_busy_start();
+  ui_flush();
   status = job_wait(job, -1);
+  ui_busy_stop();
 
   // prepare the out parameters if requested
   if (output) {
@@ -421,7 +425,7 @@ static size_t write_output(char *output, size_t remaining, bool to_buffer,
       if (to_buffer) {
         ml_append(curwin->w_cursor.lnum++, (char_u *)output, 0, false);
       } else {
-        screen_del_lines(0, 0, 1, (int)Rows, true, NULL);
+        screen_del_lines(0, 0, 1, (int)Rows, NULL);
         screen_puts_len((char_u *)output, (int)off, lastrow, 0, 0);
       }
       size_t skip = off + 1;
@@ -446,7 +450,7 @@ static size_t write_output(char *output, size_t remaining, bool to_buffer,
         // remember that the NL was missing
         curbuf->b_no_eol_lnum = curwin->w_cursor.lnum;
       } else {
-        screen_del_lines(0, 0, 1, (int)Rows, true, NULL);
+        screen_del_lines(0, 0, 1, (int)Rows, NULL);
         screen_puts_len((char_u *)output, (int)remaining, lastrow, 0, 0);
       }
       output += remaining;
@@ -455,7 +459,7 @@ static size_t write_output(char *output, size_t remaining, bool to_buffer,
     }
   }
 
-  out_flush();
+  ui_flush();
 
   return (size_t)(output - start);
 }

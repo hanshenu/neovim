@@ -21,7 +21,7 @@
 #ifdef HAVE_LOCALE_H
 # include <locale.h>
 #endif
-#include "nvim/version_defs.h"
+#include "nvim/version.h"
 #include "nvim/ex_cmds2.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
@@ -48,7 +48,6 @@
 #include "nvim/regexp.h"
 #include "nvim/screen.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
 #include "nvim/undo.h"
 #include "nvim/window.h"
 #include "nvim/profile.h"
@@ -154,10 +153,6 @@ void do_debug(char_u *cmd)
 #define CMD_QUIT        5
 #define CMD_INTERRUPT   6
 
-
-  /* Make sure we are in raw mode and start termcap mode.  Might have side
-   * effects... */
-  starttermcap();
 
   ++RedrawingDisabled;          /* don't redisplay the window */
   ++no_wait_return;             /* don't wait for return */
@@ -392,7 +387,7 @@ int dbg_check_skipped(exarg_T *eap)
     debug_breakpoint_name = debug_skipped_name;
     /* eap->skip is TRUE */
     eap->skip = FALSE;
-    (void)dbg_check_breakpoint(eap);
+    dbg_check_breakpoint(eap);
     eap->skip = TRUE;
     got_int |= prev_got_int;
     return TRUE;

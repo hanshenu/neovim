@@ -114,9 +114,13 @@ Screen.__index = Screen
 
 local debug_screen
 
-local default_screen_timeout = 2500
+local default_screen_timeout = 3500
 if os.getenv('VALGRIND') then
-  default_screen_timeout = 7500
+  default_screen_timeout = default_screen_timeout * 3
+end
+
+if os.getenv('CI_TARGET') then
+  default_screen_timeout = default_screen_timeout * 3
 end
 
 local colors = request('vim_get_color_map')
@@ -131,7 +135,7 @@ Screen.colors = colors
 
 function Screen.debug(command)
   if not command then
-    command = 'pynvim -n -g -c '
+    command = 'pynvim -n -c '
   end
   command = command .. request('vim_eval', '$NVIM_LISTEN_ADDRESS')
   if debug_screen then
@@ -160,8 +164,9 @@ function Screen.new(width, height)
     _mouse_enabled = true,
     _attrs = {},
     _cursor = {
-      enabled = true, row = 1, col = 1
-    }
+      row = 1, col = 1
+    },
+    _busy = false
   }, Screen)
   self:_handle_resize(width, height)
   return self
@@ -253,6 +258,8 @@ function Screen:_handle_resize(width, height)
     end
     table.insert(rows, cols)
   end
+  self._cursor.row = 1
+  self._cursor.col = 1
   self._rows = rows
   self._width = width
   self._height = height
@@ -276,12 +283,12 @@ function Screen:_handle_cursor_goto(row, col)
   self._cursor.col = col + 1
 end
 
-function Screen:_handle_cursor_on()
-  self._cursor.enabled = true
+function Screen:_handle_busy_start()
+  self._busy = true
 end
 
-function Screen:_handle_cursor_off()
-  self._cursor.enabled = false
+function Screen:_handle_busy_stop()
+  self._busy = false
 end
 
 function Screen:_handle_mouse_on()
@@ -410,11 +417,10 @@ function Screen:_row_repr(row, attr_ids, attr_ignore)
       table.insert(rv, '{' .. attr_id .. ':')
       current_attr_id = attr_id
     end
-    if self._rows[self._cursor.row] == row and self._cursor.col == i then
+    if not self._busy and self._rows[self._cursor.row] == row and self._cursor.col == i then
       table.insert(rv, '^')
-    else
-      table.insert(rv, row[i].text)
     end
+    table.insert(rv, row[i].text)
   end
   if current_attr_id then
     table.insert(rv, '}')

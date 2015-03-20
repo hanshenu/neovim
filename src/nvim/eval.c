@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <math.h>
+#include <limits.h>
 
 #include "nvim/lib/klist.h"
 
@@ -75,7 +76,6 @@
 #include "nvim/syntax.h"
 #include "nvim/tag.h"
 #include "nvim/tempfile.h"
-#include "nvim/term.h"
 #include "nvim/ui.h"
 #include "nvim/mouse.h"
 #include "nvim/undo.h"
@@ -351,7 +351,6 @@ typedef enum {
  * The reason to use this table anyway is for very quick access to the
  * variables with the VV_ defines.
  */
-#include "nvim/version_defs.h"
 
 /* values for vv_flags: */
 #define VV_COMPAT       1       /* compatible, also used without "v:" */
@@ -455,8 +454,8 @@ static dictitem_T vimvars_var;                  /* variable used for v: */
 // Memory pool for reusing JobEvent structures
 typedef struct {
   int id;
-  char *name, *type, *received;
-  size_t received_len;
+  char *name, *type;
+  list_T *received;
 } JobEvent;
 #define JobEventFreer(x)
 KMEMPOOL_INIT(JobEventPool, JobEvent, JobEventFreer)
@@ -3615,7 +3614,7 @@ static int eval4(char_u **arg, typval_T *rettv, int evaluate)
         s1 = get_tv_string_buf(rettv, buf1);
         s2 = get_tv_string_buf(&var2, buf2);
         if (type != TYPE_MATCH && type != TYPE_NOMATCH)
-          i = ic ? MB_STRICMP(s1, s2) : STRCMP(s1, s2);
+          i = ic ? mb_stricmp(s1, s2) : STRCMP(s1, s2);
         else
           i = 0;
         n1 = FALSE;
@@ -4955,7 +4954,7 @@ tv_equal (
   case VAR_STRING:
     s1 = get_tv_string_buf(tv1, buf1);
     s2 = get_tv_string_buf(tv2, buf2);
-    return (ic ? MB_STRICMP(s1, s2) : STRCMP(s1, s2)) == 0;
+    return (ic ? mb_stricmp(s1, s2) : STRCMP(s1, s2)) == 0;
   }
 
   EMSG2(_(e_intern2), "tv_equal()");
@@ -6489,8 +6488,9 @@ static struct fst {
   {"isdirectory",     1, 1, f_isdirectory},
   {"islocked",        1, 1, f_islocked},
   {"items",           1, 1, f_items},
+  {"jobresize",       3, 3, f_jobresize},
   {"jobsend",         2, 2, f_jobsend},
-  {"jobstart",        2, 3, f_jobstart},
+  {"jobstart",        2, 4, f_jobstart},
   {"jobstop",         1, 1, f_jobstop},
   {"join",            1, 2, f_join},
   {"keys",            1, 1, f_keys},
@@ -7287,8 +7287,7 @@ static void f_browse(typval_T *argvars, typval_T *rettv)
  */
 static void f_browsedir(typval_T *argvars, typval_T *rettv)
 {
-  rettv->vval.v_string = NULL;
-  rettv->v_type = VAR_STRING;
+  f_browse(argvars, rettv);
 }
 
 
@@ -8575,12 +8574,12 @@ static void filter_map(typval_T *argvars, typval_T *rettv, int map)
                   (char_u *)_(arg_errmsg)))
             break;
           vimvars[VV_KEY].vv_str = vim_strsave(di->di_key);
-          if (filter_map_one(&di->di_tv, expr, map, &rem) == FAIL
-              || did_emsg)
+          int r = filter_map_one(&di->di_tv, expr, map, &rem);
+          clear_tv(&vimvars[VV_KEY].vv_tv);
+          if (r == FAIL || did_emsg)
             break;
           if (!map && rem)
             dictitem_remove(d, di);
-          clear_tv(&vimvars[VV_KEY].vv_tv);
         }
       }
       hash_unlock(ht);
@@ -8622,6 +8621,7 @@ static int filter_map_one(typval_T *tv, char_u *expr, int map, int *remp)
     goto theend;
   if (*s != NUL) {  /* check for trailing chars after expr */
     EMSG2(_(e_invexpr2), s);
+    clear_tv(&rettv);
     goto theend;
   }
   if (map) {
@@ -9098,7 +9098,7 @@ static void f_getchar(typval_T *argvars, typval_T *rettv)
   int error = FALSE;
 
   /* Position the cursor.  Needed after a message that ends in a space. */
-  windgoto(msg_row, msg_col);
+  ui_cursor_goto(msg_row, msg_col);
 
   ++no_mapping;
   ++allow_keys;
@@ -9477,7 +9477,9 @@ static void getpos_both(typval_T *argvars, typval_T *rettv, bool getcurpos)
   list_append_number(l,
                      (fp != NULL) ? (varnumber_T)fp->coladd : (varnumber_T)0);
   if (getcurpos) {
-    list_append_number(l, (varnumber_T) curwin->w_curswant + 1);
+    list_append_number(l, curwin->w_curswant == MAXCOL
+                              ? (varnumber_T)MAXCOL
+                              : (varnumber_T)curwin->w_curswant + 1);
   }
 }
 
@@ -9955,14 +9957,8 @@ static void f_has(typval_T *argvars, typval_T *rettv)
 #endif
     "tag_binary",
     "tag_old_static",
-#ifdef TERMINFO
-    "terminfo",
-#endif
     "termresponse",
     "textobjects",
-#ifdef HAVE_TGETENT
-    "tgetent",
-#endif
     "title",
     "user-commands",        /* was accidentally included in 5.4 */
     "user_commands",
@@ -10660,7 +10656,7 @@ static void f_jobsend(typval_T *argvars, typval_T *rettv)
   }
 
   ssize_t input_len;
-  char *input = (char *) save_tv_as_string(&argvars[1], &input_len, true);
+  char *input = (char *) save_tv_as_string(&argvars[1], &input_len, false);
   if (!input) {
     // Either the error has been handled by save_tv_as_string(), or there is no
     // input to send.
@@ -10669,6 +10665,39 @@ static void f_jobsend(typval_T *argvars, typval_T *rettv)
 
   WBuffer *buf = wstream_new_buffer(input, input_len, 1, free);
   rettv->vval.v_number = job_write(job, buf);
+}
+
+// "jobresize()" function
+static void f_jobresize(typval_T *argvars, typval_T *rettv)
+{
+  rettv->v_type = VAR_NUMBER;
+  rettv->vval.v_number = 0;
+
+  if (check_restricted() || check_secure()) {
+    return;
+  }
+
+  if (argvars[0].v_type != VAR_NUMBER || argvars[1].v_type != VAR_NUMBER
+      || argvars[2].v_type != VAR_NUMBER) {
+    // job id, width, height
+    EMSG(_(e_invarg));
+    return;
+  }
+
+  Job *job = job_find(argvars[0].vval.v_number);
+
+  if (!job) {
+    // Probably an invalid job id
+    EMSG(_(e_invjob));
+    return;
+  }
+
+  if (!job_resize(job, argvars[1].vval.v_number, argvars[2].vval.v_number)) {
+    EMSG(_(e_jobnotpty));
+    return;
+  }
+
+  rettv->vval.v_number = 1;
 }
 
 // "jobstart()" function
@@ -10688,8 +10717,7 @@ static void f_jobstart(typval_T *argvars, typval_T *rettv)
 
   if (argvars[0].v_type != VAR_STRING
       || argvars[1].v_type != VAR_STRING
-      || (argvars[2].v_type != VAR_LIST
-      && argvars[2].v_type != VAR_UNKNOWN)) {
+      || (argvars[2].v_type != VAR_LIST && argvars[2].v_type != VAR_UNKNOWN)) {
     // Wrong argument types
     EMSG(_(e_invarg));
     return;
@@ -10731,15 +10759,31 @@ static void f_jobstart(typval_T *argvars, typval_T *rettv)
 
   // The last item of argv must be NULL
   argv[i] = NULL;
+  JobOptions opts = JOB_OPTIONS_INIT;
+  opts.argv = argv;
+  opts.data = xstrdup((char *)argvars[0].vval.v_string);
+  opts.stdout_cb = on_job_stdout;
+  opts.stderr_cb = on_job_stderr;
+  opts.exit_cb = on_job_exit;
 
-  job_start(argv,
-            xstrdup((char *)argvars[0].vval.v_string),
-            true,
-            on_job_stdout,
-            on_job_stderr,
-            on_job_exit,
-            0,
-            &rettv->vval.v_number);
+  if (args && argvars[3].v_type == VAR_DICT) {
+    dict_T *job_opts = argvars[3].vval.v_dict;
+    opts.pty = true;
+    uint16_t width = get_dict_number(job_opts, (uint8_t *)"width");
+    if (width > 0) {
+      opts.width = width;
+    }
+    uint16_t height = get_dict_number(job_opts, (uint8_t *)"height");
+    if (height > 0) {
+      opts.height = height;
+    }
+    char *term = (char *)get_dict_string(job_opts, (uint8_t *)"TERM", true);
+    if (term) {
+      opts.term_name = term;
+    }
+  }
+
+  job_start(opts, &rettv->vval.v_number);
 
   if (rettv->vval.v_number <= 0) {
     if (rettv->vval.v_number == 0) {
@@ -12745,7 +12789,7 @@ static void f_screenchar(typval_T *argvars, typval_T *rettv)
  */
 static void f_screencol(typval_T *argvars, typval_T *rettv)
 {
-  rettv->vval.v_number = screen_screencol() + 1;
+  rettv->vval.v_number = ui_current_col() + 1;
 }
 
 /*
@@ -12753,7 +12797,7 @@ static void f_screencol(typval_T *argvars, typval_T *rettv)
  */
 static void f_screenrow(typval_T *argvars, typval_T *rettv)
 {
-  rettv->vval.v_number = screen_screenrow() + 1;
+  rettv->vval.v_number = ui_current_row() + 1;
 }
 
 /*
@@ -14424,13 +14468,10 @@ static void f_synIDattr(typval_T *argvars, typval_T *rettv)
   if (argvars[2].v_type != VAR_UNKNOWN) {
     mode = get_tv_string_buf(&argvars[2], modebuf);
     modec = TOLOWER_ASC(mode[0]);
-    if (modec != 't' && modec != 'c' && modec != 'g')
+    if (modec != 'c' && modec != 'g')
       modec = 0;        /* replace invalid with current */
   } else {
-    if (abstract_ui || t_colors > 1)
-      modec = 'c';
-    else
-      modec = 't';
+    modec = 'c';
   }
 
 
@@ -17156,7 +17197,7 @@ void ex_execute(exarg_T *eap)
   if (ret != FAIL && ga.ga_data != NULL) {
     if (eap->cmdidx == CMD_echomsg) {
       MSG_ATTR(ga.ga_data, echo_attr);
-      out_flush();
+      ui_flush();
     } else if (eap->cmdidx == CMD_echoerr) {
       /* We don't want to abort following commands, restore did_emsg. */
       save_did_emsg = did_emsg;
@@ -17354,7 +17395,7 @@ void ex_function(exarg_T *eap)
           if (j < 99)
             msg_putchar(' ');
           msg_prt_line(FUNCLINE(fp, j), FALSE);
-          out_flush();                  /* show a line at a time */
+          ui_flush();                  /* show a line at a time */
           os_breakcheck();
         }
         if (!got_int) {
@@ -18078,21 +18119,6 @@ static int function_exists(char_u *name)
     n = translated_function_exists(p);
   free(p);
   return n;
-}
-
-char_u *get_expanded_name(char_u *name, int check)
-{
-  char_u      *nm = name;
-  char_u      *p;
-
-  p = trans_function_name(&nm, FALSE, TFN_INT|TFN_QUIET, NULL);
-
-  if (p != NULL && *nm == NUL)
-    if (!check || translated_function_exists(p))
-      return p;
-
-  free(p);
-  return NULL;
 }
 
 /// Return TRUE if "name" looks like a builtin function name: starts with a
@@ -19377,7 +19403,7 @@ void ex_oldfiles(exarg_T *eap)
       MSG_PUTS(": ");
       msg_outtrans(get_tv_string(&li->li_tv));
       msg_putchar('\n');
-      out_flush();                  /* output one line at a time */
+      ui_flush();                  /* output one line at a time */
       os_breakcheck();
     }
     /* Assume "got_int" was set to truncate the listing. */
@@ -19729,72 +19755,73 @@ char_u *do_string_sub(char_u *str, char_u *pat, char_u *sub, char_u *flags)
 
 // JobActivity autocommands will execute vimscript code, so it must be executed
 // on Nvim main loop
-#define push_job_event(j, r, t, eof)                                 \
-  do {                                                               \
-    JobEvent *event_data = kmp_alloc(JobEventPool, job_event_pool);  \
-    event_data->received = NULL;                                     \
-    size_t read_count = 0;                                           \
-    if (r) {                                                         \
-      if (eof) {                                                     \
-        read_count = rstream_pending(r);                             \
-      } else {                                                       \
-        char *read = rstream_read_ptr(r);                            \
-        char *lastnl = xmemrchr(read, NL, rstream_pending(r));       \
-        if (lastnl) {                                                \
-          read_count = (size_t) (lastnl - read) + 1;                 \
-        } else if (rstream_available(r) == 0) {                      \
-          /* No newline or room to grow; flush everything. */        \
-          read_count = rstream_pending(r);                           \
-        }                                                            \
-      }                                                              \
-      if (read_count == 0) {                                         \
-        /* Either we're at EOF or we need to wait until next time */ \
-        /* to receive a '\n. */                                      \
-        kmp_free(JobEventPool, job_event_pool, event_data);          \
-        return;                                                      \
-      }                                                              \
-      event_data->received_len = read_count;                         \
-      event_data->received = xmallocz(read_count);                   \
-      rstream_read(r, event_data->received, read_count);             \
-    }                                                                \
-    event_data->id = job_id(j);                                      \
-    event_data->name = job_data(j);                                  \
-    event_data->type = t;                                            \
-    event_push((Event) {                                             \
-      .handler = on_job_event,                                       \
-      .data = event_data                                             \
-    }, true);                                                        \
-  } while(0)
+static inline void push_job_event(Job *job, RStream *rstream, char *type)
+{
+  JobEvent *event_data = kmp_alloc(JobEventPool, job_event_pool);
+  event_data->received = NULL;
+  if (rstream) {
+    event_data->received = list_alloc();
+    char *ptr = rstream_read_ptr(rstream);
+    size_t count = rstream_pending(rstream);
+    size_t remaining = count;
+    size_t off = 0;
+
+    while (off < remaining) {
+      // append the line
+      if (ptr[off] == NL) {
+        list_append_string(event_data->received, (uint8_t *)ptr, off);
+        size_t skip = off + 1;
+        ptr += skip;
+        remaining -= skip;
+        off = 0;
+        continue;
+      }
+      if (ptr[off] == NUL) {
+        // Translate NUL to NL
+        ptr[off] = NL;
+      }
+      off++;
+    }
+    list_append_string(event_data->received, (uint8_t *)ptr, off);
+    rbuffer_consumed(rstream_buffer(rstream), count);
+  }
+  event_data->id = job_id(job);
+  event_data->name = job_data(job);
+  event_data->type = type;
+  event_push((Event) {
+    .handler = on_job_event,
+    .data = event_data
+  }, true);
+}
 
 static void on_job_stdout(RStream *rstream, void *data, bool eof)
 {
-  if (rstream_pending(rstream)) {
-    push_job_event(data, rstream, "stdout", eof);
+  if (!eof) {
+    push_job_event(data, rstream, "stdout");
   }
 }
 
 static void on_job_stderr(RStream *rstream, void *data, bool eof)
 {
-  if (rstream_pending(rstream)) {
-    push_job_event(data, rstream, "stderr", eof);
+  if (!eof) {
+    push_job_event(data, rstream, "stderr");
   }
 }
 
 static void on_job_exit(Job *job, void *data)
 {
-  push_job_event(job, NULL, "exit", true);
+  push_job_event(job, NULL, "exit");
 }
 
 static void on_job_event(Event event)
 {
   JobEvent *data = event.data;
-  apply_job_autocmds(data->id, data->name, data->type,
-                     data->received, data->received_len);
+  apply_job_autocmds(data->id, data->name, data->type, data->received);
   kmp_free(JobEventPool, job_event_pool, data);
 }
 
 static void apply_job_autocmds(int id, char *name, char *type,
-                               char *received, size_t received_len)
+                               list_T *received)
 {
   // Create the list which will be set to v:job_data
   list_T *list = list_alloc();
@@ -19805,12 +19832,9 @@ static void apply_job_autocmds(int id, char *name, char *type,
     listitem_T *str_slot = listitem_alloc();
     str_slot->li_tv.v_type = VAR_LIST;
     str_slot->li_tv.v_lock = 0;
-    str_slot->li_tv.vval.v_list =
-      string_to_list((char_u *) received, received_len, false);
+    str_slot->li_tv.vval.v_list = received;
     str_slot->li_tv.vval.v_list->lv_refcount++;
     list_append(list, str_slot);
-
-    free(received);
   }
 
   // Update v:job_data for the autocommands

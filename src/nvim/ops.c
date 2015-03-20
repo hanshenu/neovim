@@ -45,7 +45,7 @@
 #include "nvim/screen.h"
 #include "nvim/search.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/undo.h"
 #include "nvim/window.h"
 #include "nvim/os/input.h"
@@ -1494,7 +1494,7 @@ int op_delete(oparg_T *oap)
       if (oap->line_count > 1) {
         lnum = curwin->w_cursor.lnum;
         ++curwin->w_cursor.lnum;
-        del_lines((long)(oap->line_count - 1), TRUE);
+        del_lines(oap->line_count - 1, TRUE);
         curwin->w_cursor.lnum = lnum;
       }
       if (u_save_cursor() == FAIL)
@@ -1607,7 +1607,7 @@ int op_delete(oparg_T *oap)
 
       curpos = curwin->w_cursor;        /* remember curwin->w_cursor */
       ++curwin->w_cursor.lnum;
-      del_lines((long)(oap->line_count - 2), FALSE);
+      del_lines(oap->line_count - 2, FALSE);
 
       if (delete_last_line)
         oap->end.lnum = curbuf->b_ml.ml_line_count;
@@ -3200,13 +3200,10 @@ void ex_display(exarg_T *eap)
   MSG_PUTS_TITLE(_("\n--- Registers ---"));
   for (i = -1; i < NUM_REGISTERS && !got_int; ++i) {
     name = get_register_name(i);
-    if (arg != NULL && vim_strchr(arg, name) == NULL
-#ifdef ONE_CLIPBOARD
-        /* Star register and plus register contain the same thing. */
-        && (name != '*' || vim_strchr(arg, '+') == NULL)
-#endif
-        )
+
+    if (arg != NULL && vim_strchr(arg, name) == NULL) {
       continue;             /* did not ask for this register */
+    }
 
     get_clipboard(name);
 
@@ -3243,7 +3240,7 @@ void ex_display(exarg_T *eap)
       }
       if (n > 1 && yb->y_type == MLINE)
         MSG_PUTS_ATTR("^J", attr);
-      out_flush();                          /* show one line at a time */
+      ui_flush();                          /* show one line at a time */
     }
     os_breakcheck();
   }

@@ -47,7 +47,7 @@
 #include "nvim/screen.h"
 #include "nvim/search.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/tempfile.h"
 #include "nvim/window.h"
 #include "nvim/os/os.h"
@@ -1786,7 +1786,7 @@ void qf_list(exarg_T *eap)
           ? skipwhite(qfp->qf_text) : qfp->qf_text,
           IObuff, IOSIZE);
       msg_prt_line(IObuff, FALSE);
-      out_flush();                      /* show one line at a time */
+      ui_flush();                      /* show one line at a time */
     }
 
     qfp = qfp->qf_next;
@@ -2845,7 +2845,7 @@ void ex_vimgrep(exarg_T *eap)
       msg_didout = FALSE;           /* overwrite this message */
       msg_nowait = TRUE;            /* don't wait for this message */
       msg_col = 0;
-      out_flush();
+      ui_flush();
     }
 
     buf = buflist_findname_exp(fnames[fi]);
@@ -3554,7 +3554,7 @@ void ex_helpgrep(exarg_T *eap)
 
       // Note: We cannot just do `&NameBuff` because it is a statically sized array
       //       so `NameBuff == &NameBuff` according to C semantics.
-      char_u *buff_list[1] = {(char_u*) NameBuff};
+      char_u *buff_list[1] = {NameBuff};
       if (gen_expand_wildcards(1, buff_list, &fcount,
               &fnames, EW_FILE|EW_SILENT) == OK
           && fcount > 0) {

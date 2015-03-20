@@ -29,7 +29,6 @@
 #include "nvim/keymap.h"
 #include "nvim/garray.h"
 #include "nvim/strings.h"
-#include "nvim/term.h"
 
 
 #define MENUDEPTH   10          /* maximum depth of menus */
@@ -1475,7 +1474,6 @@ void ex_menutranslate(exarg_T *eap)
         tp->to = to;
       } else {
         free(from);
-        free(from_noamp);
         free(to);
       }
     }

@@ -325,7 +325,7 @@
 #include "nvim/search.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/tempfile.h"
 #include "nvim/undo.h"
 #include "nvim/os/os.h"
@@ -2541,7 +2541,7 @@ spell_load_file (
       EMSG2(_(e_notopen), fname);
     else if (p_verbose > 2) {
       verbose_enter();
-      smsg((char_u *)e_notopen, fname);
+      smsg(e_notopen, fname);
       verbose_leave();
     }
     goto endFAIL;
@@ -5476,11 +5476,11 @@ static int spell_read_dic(spellinfo_T *spin, char_u *fname, afffile_T *affile)
       msg_clr_eos();
       msg_didout = FALSE;
       msg_col = 0;
-      out_flush();
+      ui_flush();
     }
 
     // Store the word in the hashtable to be able to find duplicates.
-    dw = (char_u *)getroom_save(spin, w);
+    dw = getroom_save(spin, w);
     if (dw == NULL) {
       retval = FAIL;
       free(pc);
@@ -6327,7 +6327,7 @@ static int tree_add_word(spellinfo_T *spin, char_u *word, wordnode_T *root, int 
       msg_clr_eos();
       msg_didout = FALSE;
       msg_col = 0;
-      out_flush();
+      ui_flush();
     }
 
     // Compress both trees.  Either they both have many nodes, which makes
@@ -7749,7 +7749,7 @@ static void spell_message(spellinfo_T *spin, char_u *str)
     if (!spin->si_verbose)
       verbose_enter();
     MSG(str);
-    out_flush();
+    ui_flush();
     if (!spin->si_verbose)
       verbose_leave();
   }
@@ -10904,7 +10904,7 @@ stp_sal_score (
   char_u goodword[MAXWLEN];
   int lendiff;
 
-  lendiff = (int)(su->su_badlen - stp->st_orglen);
+  lendiff = su->su_badlen - stp->st_orglen;
   if (lendiff >= 0)
     pbad = badsound;
   else {
@@ -13082,8 +13082,9 @@ spell_dump_compl (
             // proper case later.  This isn't exactly right when
             // length changes for multi-byte characters with
             // ignore case...
+            assert(depth >= 0);
             if (depth <= patlen
-                && MB_STRNICMP(word, pat, depth) != 0)
+                && mb_strnicmp(word, pat, (size_t)depth) != 0)
               --depth;
           }
         }
@@ -13154,7 +13155,7 @@ static void dump_word(slang_T *slang, char_u *word, char_u *pat, int *dir, int d
 
     ml_append(lnum, p, (colnr_T)0, FALSE);
   } else if (((dumpflags & DUMPFLAG_ICASE)
-              ? MB_STRNICMP(p, pat, STRLEN(pat)) == 0
+              ? mb_strnicmp(p, pat, STRLEN(pat)) == 0
               : STRNCMP(p, pat, STRLEN(pat)) == 0)
              && ins_compl_add_infercase(p, (int)STRLEN(p),
                  p_ic, NULL, *dir, 0) == OK)

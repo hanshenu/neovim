@@ -49,7 +49,7 @@
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
 #include "nvim/tag.h"
-#include "nvim/term.h"
+#include "nvim/ui.h"
 #include "nvim/window.h"
 #include "nvim/os/os.h"
 #include "nvim/os/shell.h"
@@ -296,8 +296,7 @@ int call_shell(char_u *cmd, ShellOpts opts, char_u *extra_shell_arg)
     verbose_enter();
     smsg((char_u *)_("Calling shell to execute: \"%s\""),
         cmd == NULL ? p_sh : cmd);
-    out_char('\n');
-    cursor_on();
+    ui_putc('\n');
     verbose_leave();
   }
 
@@ -333,11 +332,6 @@ int call_shell(char_u *cmd, ShellOpts opts, char_u *extra_shell_arg)
       if (ecmd != cmd)
         free(ecmd);
     }
-    /*
-     * Check the window size, in case it changed while executing the
-     * external command.
-     */
-    shell_resized_check();
   }
 
   set_vim_var_nr(VV_SHELL_ERROR, (long)retval);
@@ -393,42 +387,6 @@ int vim_chdir(char_u *new_dir)
   r = os_chdir((char *)dir_name);
   free(dir_name);
   return r;
-}
-
-
-/*
- * Print an error message with one or two "%s" and one or two string arguments.
- * This is not in message.c to avoid a warning for prototypes.
- */
-int emsg3(char_u *s, char_u *a1, char_u *a2)
-{
-  if (emsg_not_now())
-    return TRUE;                /* no error messages at the moment */
-  vim_snprintf((char *)IObuff, IOSIZE, (char *)s, a1, a2);
-  return emsg(IObuff);
-}
-
-/*
- * Print an error message with one "%" PRId64 and one (int64_t) argument.
- * This is not in message.c to avoid a warning for prototypes.
- */
-int emsgn(char_u *s, int64_t n)
-{
-  if (emsg_not_now())
-    return TRUE;                /* no error messages at the moment */
-  vim_snprintf((char *)IObuff, IOSIZE, (char *)s, n);
-  return emsg(IObuff);
-}
-
-/*
- * Print an error message with one "%" PRIu64 and one (uint64_t) argument.
- */
-int emsgu(char_u *s, uint64_t n)
-{
-  if (emsg_not_now())
-    return TRUE;                /* no error messages at the moment */
-  vim_snprintf((char *)IObuff, IOSIZE, (char *)s, n);
-  return emsg(IObuff);
 }
 
 /*

@@ -99,7 +99,6 @@
 #include "nvim/memline.h"
 #include "nvim/message.h"
 #include "nvim/misc1.h"
-#include "nvim/misc2.h"
 #include "nvim/memory.h"
 #include "nvim/garray.h"
 #include "nvim/option.h"
@@ -295,13 +294,11 @@ int undo_allowed(void)
     return FALSE;
   }
 
-#ifdef HAVE_SANDBOX
-  /* In the sandbox it's not allowed to change the text. */
+  // In the sandbox it's not allowed to change the text.
   if (sandbox != 0) {
     EMSG(_(e_sandbox));
     return FALSE;
   }
-#endif
 
   /* Don't allow changes in the buffer while editing the cmdline.  The
    * caller of getcmdline() may get confused. */

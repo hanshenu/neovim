@@ -24,7 +24,6 @@
 #include "nvim/memory.h"
 #include "nvim/os_unix.h"
 #include "nvim/message.h"
-#include "nvim/term.h"
 #include "nvim/map.h"
 #include "nvim/log.h"
 #include "nvim/misc1.h"
@@ -103,9 +102,7 @@ void channel_init(void)
     channel_from_stdio();
   }
 
-  if (abstract_ui) {
-    remote_ui_init();
-  }
+  remote_ui_init();
 }
 
 /// Teardown the module
@@ -135,14 +132,13 @@ uint64_t channel_from_job(char **argv)
   incref(channel);  // job channels are only closed by the exit_cb
 
   int status;
-  channel->data.job = job_start(argv,
-                                channel,
-                                true,
-                                job_out,
-                                job_err,
-                                job_exit,
-                                0,
-                                &status);
+  JobOptions opts = JOB_OPTIONS_INIT;
+  opts.argv = argv;
+  opts.data = channel;
+  opts.stdout_cb = job_out;
+  opts.stderr_cb = job_err;
+  opts.exit_cb = job_exit;
+  channel->data.job = job_start(opts, &status);
 
   if (status <= 0) {
     if (status == 0) {  // Two decrefs needed if status == 0.
@@ -174,13 +170,6 @@ void channel_from_stream(uv_stream_t *stream)
   channel->data.streams.write = wstream_new(0);
   wstream_set_stream(channel->data.streams.write, stream);
   channel->data.streams.uv = stream;
-}
-
-bool channel_exists(uint64_t id)
-{
-  Channel *channel;
-  return (channel = pmap_get(uint64_t)(channels, id)) != NULL
-    && !channel->closed;
 }
 
 /// Sends event/arguments to channel
@@ -416,8 +405,8 @@ static void parse_msgpack(RStream *rstream, void *data, bool eof)
   }
 
   if (result == MSGPACK_UNPACK_NOMEM_ERROR) {
-    OUT_STR(e_outofmem);
-    out_char('\n');
+    mch_errmsg(e_outofmem);
+    mch_errmsg("\n");
     decref(channel);
     preserve_exit();
   }
@@ -665,10 +654,7 @@ static void on_stdio_close(Event e)
 
 static void free_channel(Channel *channel)
 {
-  if (abstract_ui) {
-    remote_ui_disconnect(channel->id);
-  }
-
+  remote_ui_disconnect(channel->id);
   pmap_del(uint64_t)(channels, channel->id);
   msgpack_unpacker_free(channel->unpacker);
 
